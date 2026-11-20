@@ -18,3 +18,8 @@ dev = [
     "ruff>=0.17.0",
 ]
 
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:torchrl.*",
+]
+

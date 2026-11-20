@@ -43,23 +43,24 @@ def showcase_consecutive_goal_chaining(env: LeapCubeReorientEnv) -> None:
     env.pd_controller.step_delta = oracle_step_delta
     current_td = td
 
-    for chain_target in range(1, 3):
-        initial_goal = env.desired_goal.clone().cpu().numpy()
-        print(
-            f"Tracking Target {chain_target}: "
-            f"[{initial_goal[0]:.3f}, {initial_goal[1]:.3f}, {initial_goal[2]:.3f}, {initial_goal[3]:.3f}]"
-        )
-        for _ in range(5):
-            current_td["action"] = torch.zeros(16)
-            out = env.step(current_td)
-            current_td = out["next"]
-        new_goal = env.desired_goal.clone().cpu().numpy()
-        print(
-            f"  Goal Achieved! Consecutive successes: {env.consecutive_successes} | "
-            f"New Target Resampled: [{new_goal[0]:.3f}, {new_goal[1]:.3f}, {new_goal[2]:.3f}, {new_goal[3]:.3f}]"
-        )
-
-    env.pd_controller.step_delta = orig_step_delta
+    try:
+        for chain_target in range(1, 3):
+            initial_goal = env.desired_goal.clone().cpu().numpy()
+            print(
+                f"Tracking Target {chain_target}: "
+                f"[{initial_goal[0]:.3f}, {initial_goal[1]:.3f}, {initial_goal[2]:.3f}, {initial_goal[3]:.3f}]"
+            )
+            for _ in range(5):
+                current_td["action"] = torch.zeros(16)
+                out = env.step(current_td)
+                current_td = out["next"]
+            new_goal = env.desired_goal.clone().cpu().numpy()
+            print(
+                f"  Goal Achieved! Consecutive successes: {env.consecutive_successes} | "
+                f"New Target Resampled: [{new_goal[0]:.3f}, {new_goal[1]:.3f}, {new_goal[2]:.3f}, {new_goal[3]:.3f}]"
+            )
+    finally:
+        env.pd_controller.step_delta = orig_step_delta
 
 
 def main() -> None:

@@ -218,11 +218,7 @@ class LeapCubeReorientEnv(EnvBase):
         self.data.qpos[16:19] = initial_cube_pos
 
         if self.randomize_initial_orientation:
-            if self.target_mode == "yaw":
-                quat = sample_yaw_quat(1, device=self.device)[0].detach().cpu().numpy()
-            else:
-                quat = sample_uniform_quat(1, device=self.device)[0].detach().cpu().numpy()
-            self.data.qpos[19:23] = quat
+            self.data.qpos[19:23] = self._sample_goal().detach().cpu().numpy()
         else:
             self.data.qpos[19:23] = DEFAULT_CUBE_QUAT
 
