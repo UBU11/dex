@@ -8,15 +8,7 @@ import torch
 
 
 class DomainRandomizer:
-    """Domain randomizer for LEAP Hand and cube manipulation physics.
-
-    Randomizes:
-    - Cube mass: [0.5x, 1.5x] of nominal (~70g to 210g)
-    - Cube surface friction (sliding, torsional, rolling): [0.6x, 1.4x] of nominal
-    - Hand joint damping: [0.7x, 1.3x] of nominal
-    - Observation latency queue: 0, 1, or 2 steps of latency
-    - Always synchronizes model via mujoco.mj_setConst(model, data).
-    """
+    """Domain randomizer for LEAP Hand and cube manipulation physics."""
 
     def __init__(
         self,
@@ -28,6 +20,7 @@ class DomainRandomizer:
         mass_range: tuple[float, float] = (0.5, 1.5),
         friction_range: tuple[float, float] = (0.6, 1.4),
         damping_range: tuple[float, float] = (0.7, 1.3),
+        sensor_noise_std: float = 0.005,
     ) -> None:
         self.model = model
         self.data = data
@@ -35,13 +28,20 @@ class DomainRandomizer:
         self.mass_range = mass_range
         self.friction_range = friction_range
         self.damping_range = damping_range
+        self.sensor_noise_std = sensor_noise_std
+        self.difficulty = 0.0
+        self.current_sensor_noise_std = 0.0
 
         # Locate cube body and geom IDs
-        self.cube_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, cube_body_name)
+        self.cube_body_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_BODY, cube_body_name
+        )
         if self.cube_body_id == -1:
             raise ValueError(f"Body '{cube_body_name}' not found in model.")
 
-        self.cube_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, cube_geom_name)
+        self.cube_geom_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_GEOM, cube_geom_name
+        )
         if self.cube_geom_id == -1:
             raise ValueError(f"Geom '{cube_geom_name}' not found in model.")
 
@@ -55,25 +55,37 @@ class DomainRandomizer:
         self.current_latency_steps = 0
         self.obs_queue: deque[np.ndarray] = deque(maxlen=max(max_latency + 5, 10))
 
+    def set_difficulty(self, level: float) -> None:
+        """Sets ADR difficulty level clamped to [0.0, 1.0], scaling dynamic ranges."""
+        clamped = float(np.clip(level, 0.0, 1.0))
+        self.difficulty = clamped
+        self.mass_range = (1.0 - 0.5 * clamped, 1.0 + 0.5 * clamped)
+        self.friction_range = (1.0 - 0.4 * clamped, 1.0 + 0.4 * clamped)
+        self.damping_range = (1.0 - 0.3 * clamped, 1.0 + 0.3 * clamped)
+        self.max_latency = round(2 * clamped)
+        self.current_sensor_noise_std = self.sensor_noise_std * clamped
+
     def randomize(self, rng: np.random.Generator | None = None) -> None:
         """Mutates model parameters and latency, calling mj_setConst."""
         if rng is None:
             rng = np.random.default_rng()
 
-        # 1. Cube Mass: [0.5x, 1.5x] of nominal
         mass_scale = float(rng.uniform(self.mass_range[0], self.mass_range[1]))
         self.model.body_mass[self.cube_body_id] = self.nominal_mass * mass_scale
         self.model.body_inertia[self.cube_body_id] = self.nominal_inertia * mass_scale
 
-        # 2. Cube Surface Friction (sliding, torsional, rolling): [0.6x, 1.4x] of nominal
-        friction_scale = rng.uniform(self.friction_range[0], self.friction_range[1], size=3)
-        self.model.geom_friction[self.cube_geom_id] = self.nominal_friction * friction_scale
+        friction_scale = rng.uniform(
+            self.friction_range[0], self.friction_range[1], size=3
+        )
+        self.model.geom_friction[self.cube_geom_id] = (
+            self.nominal_friction * friction_scale
+        )
 
-        # 3. Hand Joint Damping: [0.7x, 1.3x] of nominal
-        damping_scale = rng.uniform(self.damping_range[0], self.damping_range[1], size=16)
+        damping_scale = rng.uniform(
+            self.damping_range[0], self.damping_range[1], size=16
+        )
         self.model.dof_damping[:16] = self.nominal_damping * damping_scale
 
-        # 4. Latency steps: 0, 1, or 2 steps
         self.current_latency_steps = int(rng.integers(0, self.max_latency + 1))
         self.obs_queue.clear()
 
@@ -90,7 +102,9 @@ class DomainRandomizer:
         self.obs_queue.clear()
         mujoco.mj_setConst(self.model, self.data)
 
-    def reset_latency(self, initial_obs: np.ndarray | torch.Tensor | None = None) -> None:
+    def reset_latency(
+        self, initial_obs: np.ndarray | torch.Tensor | None = None
+    ) -> None:
         """Clears observation delay queue and optionally stores initial observation."""
         self.obs_queue.clear()
         if initial_obs is not None:
@@ -101,9 +115,11 @@ class DomainRandomizer:
             self.obs_queue.append(arr)
 
     def get_delayed_observation(
-        self, raw_obs: np.ndarray | torch.Tensor
+        self,
+        raw_obs: np.ndarray | torch.Tensor,
+        rng: np.random.Generator | None = None,
     ) -> np.ndarray | torch.Tensor:
-        """Appends raw observation to buffer and returns delayed observation."""
+        """Appends raw observation to buffer and returns delayed observation with sensor noise."""
         is_torch = isinstance(raw_obs, torch.Tensor)
         if is_torch:
             arr = raw_obs.detach().cpu().numpy().copy()
@@ -113,8 +129,50 @@ class DomainRandomizer:
         self.obs_queue.append(arr)
         # ponytail: clamp index to return oldest available observation during initial warm-up
         idx = max(0, len(self.obs_queue) - 1 - self.current_latency_steps)
-        delayed_arr = self.obs_queue[idx]
+        delayed_arr = self.obs_queue[idx].copy()
+
+        if self.current_sensor_noise_std > 0:
+            if rng is None:
+                rng = np.random.default_rng()
+            noise = rng.normal(
+                0.0, self.current_sensor_noise_std, size=delayed_arr.shape
+            )
+            delayed_arr = (delayed_arr + noise).astype(delayed_arr.dtype)
 
         if is_torch:
-            return torch.as_tensor(delayed_arr, device=raw_obs.device, dtype=raw_obs.dtype)
+            return torch.as_tensor(
+                delayed_arr, device=raw_obs.device, dtype=raw_obs.dtype
+            )
         return delayed_arr
+
+
+class ADRCurriculumController:
+    """Automatic Domain Randomization (ADR) curriculum controller."""
+
+    def __init__(
+        self,
+        randomizer: DomainRandomizer,
+        start_threshold: float = 0.50,
+        target_threshold: float = 0.85,
+        step_size: float = 0.05,
+        initial_difficulty: float = 0.0,
+    ) -> None:
+        self.randomizer = randomizer
+        self.start_threshold = start_threshold
+        self.target_threshold = target_threshold
+        self.step_size = step_size
+        self._difficulty = 0.0
+        self.set_difficulty(initial_difficulty)
+
+    @property
+    def difficulty(self) -> float:
+        return self._difficulty
+
+    def set_difficulty(self, level: float) -> None:
+        self._difficulty = float(np.clip(level, 0.0, 1.0))
+        self.randomizer.set_difficulty(self._difficulty)
+
+    def update(self, success_rate: float) -> float:
+        if success_rate >= self.start_threshold:
+            self.set_difficulty(self._difficulty + self.step_size)
+        return self._difficulty
