@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "mujoco>=3.4",
     "mujoco-menagerie>=2026.9.0",
+    "onnx>=1.23.2",
     "tensordict>=0.15.2",
     "torch>=2.15.0",
     "torchrl>=0.15.0",
@@ -19,6 +20,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning:torchrl.*",
 ]
