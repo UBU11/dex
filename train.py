@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable-adr", action=argparse.BooleanOptionalAction, default=True
     )
+    parser.add_argument(
+        "--early-stop-on-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--target-success-rate", type=float, default=0.85)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--max-steps", type=int, default=400)
@@ -120,6 +125,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     last_save_frame = 0
     saved_checkpoints: list[str] = []
     onnx_exported = False
+    converged = False
     last_eval_metrics: dict[str, float] = {}
     current_step = start_step
 
@@ -209,7 +215,16 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     onnx_exported = True
 
-                if last_eval_metrics["success_rate"] >= args.target_success_rate:
+                curr_diff = (
+                    eval_curriculum.difficulty
+                    if eval_curriculum is not None
+                    else 1.0
+                )
+                if (
+                    last_eval_metrics["success_rate"] >= args.target_success_rate
+                    and curr_diff >= 1.0 - 1e-6
+                ):
+                    converged = True
                     benchmark_onnx = ckpt_dir / "benchmark_policy.onnx"
                     export_policy_onnx(
                         onnx_path=benchmark_onnx,
@@ -229,6 +244,27 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     f"Diff: {last_eval_metrics.get('difficulty', 0.0):.2f} | "
                     f"Alpha: {trainer.alpha:.4f}"
                 )
+
+                if converged and args.early_stop_on_target:
+                    step_ckpt = ckpt_dir / f"checkpoint_step_{current_step}.pt"
+                    save_checkpoint(
+                        checkpoint_path=step_ckpt,
+                        actor=actor,
+                        critic=critic,
+                        trainer=trainer,
+                        curriculum_controller=eval_curriculum,
+                        step=current_step,
+                        best_success_rate=best_success_rate,
+                        extra_info={"eval_metrics": last_eval_metrics},
+                    )
+                    step_ckpt_str = str(step_ckpt)
+                    if step_ckpt_str not in saved_checkpoints:
+                        saved_checkpoints.append(step_ckpt_str)
+                    print(
+                        f"[Early Stop] Target success rate {args.target_success_rate * 100:.1f}% "
+                        f"achieved at max difficulty {curr_diff:.2f} (step {current_step})."
+                    )
+                    break
 
             if (total_frames - last_save_frame >= args.save_interval) or (
                 total_frames >= args.total_frames
@@ -253,6 +289,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "total_frames": total_frames,
         "final_step": current_step,
+        "converged": converged,
         "best_success_rate": float(best_success_rate),
         "last_eval_metrics": {
             k: float(v) for k, v in last_eval_metrics.items()

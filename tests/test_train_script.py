@@ -28,6 +28,7 @@ def test_parse_args_defaults():
     assert args.checkpoint_dir == "checkpoints"
     assert args.resume is None
     assert args.enable_adr is True
+    assert args.early_stop_on_target is True
     assert args.target_success_rate == pytest.approx(0.85)
     assert args.device == "cpu"
     assert args.max_steps == 400
@@ -58,6 +59,7 @@ def test_parse_args_overrides():
         "--resume",
         "/tmp/custom_ckpt/model.pt",
         "--no-enable-adr",
+        "--no-early-stop-on-target",
         "--target-success-rate",
         "0.9",
         "--device",
@@ -78,6 +80,7 @@ def test_parse_args_overrides():
     assert args.checkpoint_dir == "/tmp/custom_ckpt"
     assert args.resume == "/tmp/custom_ckpt/model.pt"
     assert args.enable_adr is False
+    assert args.early_stop_on_target is False
     assert args.target_success_rate == pytest.approx(0.9)
     assert args.device == "cpu"
     assert args.max_steps == 50
@@ -118,6 +121,7 @@ def test_train_programmatic_short_run(tmp_path):
 
     assert isinstance(summary, dict)
     assert summary["total_frames"] >= 100
+    assert summary["converged"] is False
     assert "best_success_rate" in summary
     assert "last_eval_metrics" in summary
     assert "saved_checkpoints" in summary
@@ -252,4 +256,159 @@ def test_train_cuda_short_run(tmp_path):
     assert "best_success_rate" in summary
     assert ckpt_dir.is_dir()
     assert (ckpt_dir / "metrics_summary.json").is_file()
+
+
+def test_train_early_stopping_on_target_convergence(tmp_path, monkeypatch):
+    ckpt_dir = tmp_path / "checkpoints_early_stop"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "10000",
+            "--frames-per-batch",
+            "50",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "50",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "50",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--no-enable-adr",
+            "--early-stop-on-target",
+            "--target-success-rate",
+            "0.85",
+        ]
+    )
+
+    mock_metrics = {
+        "success_rate": 0.95,
+        "mean_consecutive_successes": 5.0,
+        "mean_geodesic_error": 0.04,
+        "mean_return": 120.0,
+    }
+    monkeypatch.setattr("train.evaluate_policy", lambda **kwargs: mock_metrics)
+
+    summary = train(args)
+
+    assert summary["converged"] is True
+    assert summary["total_frames"] == 50
+    assert (ckpt_dir / "benchmark_policy.onnx").is_file()
+    assert (ckpt_dir / "best_policy.onnx").is_file()
+
+
+def test_train_early_stopping_adr_curriculum(tmp_path, monkeypatch):
+    ckpt_dir = tmp_path / "checkpoints_adr_early_stop"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "10000",
+            "--frames-per-batch",
+            "50",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "50",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "50",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--enable-adr",
+            "--early-stop-on-target",
+            "--target-success-rate",
+            "0.85",
+        ]
+    )
+
+    mock_metrics = {
+        "success_rate": 0.95,
+        "mean_consecutive_successes": 5.0,
+        "mean_geodesic_error": 0.04,
+        "mean_return": 120.0,
+    }
+    monkeypatch.setattr("train.evaluate_policy", lambda **kwargs: mock_metrics)
+
+    from src.envs.domain_randomization import ADRCurriculumController
+
+    orig_init = ADRCurriculumController.__init__
+
+    def patched_init(self, *a, **kw):
+        orig_init(self, *a, **kw)
+        self.set_difficulty(1.0)
+
+    monkeypatch.setattr(ADRCurriculumController, "__init__", patched_init)
+
+    summary = train(args)
+
+    assert summary["converged"] is True
+    assert summary["total_frames"] == 50
+    assert (ckpt_dir / "benchmark_policy.onnx").is_file()
+
+
+def test_train_no_early_stop_when_disabled(tmp_path, monkeypatch):
+    ckpt_dir = tmp_path / "checkpoints_no_early_stop"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "100",
+            "--frames-per-batch",
+            "50",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "50",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "50",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--no-enable-adr",
+            "--no-early-stop-on-target",
+            "--target-success-rate",
+            "0.85",
+        ]
+    )
+
+    mock_metrics = {
+        "success_rate": 0.95,
+        "mean_consecutive_successes": 5.0,
+        "mean_geodesic_error": 0.04,
+        "mean_return": 120.0,
+    }
+    monkeypatch.setattr("train.evaluate_policy", lambda **kwargs: mock_metrics)
+
+    summary = train(args)
+
+    assert summary["converged"] is True
+    assert summary["total_frames"] == 100
+
 
