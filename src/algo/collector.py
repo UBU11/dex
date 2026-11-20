@@ -24,10 +24,16 @@ class PolicyModule(nn.Module):
         self.deterministic = deterministic
 
     def forward(self, td: TensorDict) -> TensorDict:
+        actor_device = next(self.actor.parameters()).device
         obs = td["obs"]
         desired_goal = td["desired_goal"]
-        action, _ = self.actor(obs, desired_goal, deterministic=self.deterministic)
-        td["action"] = action
+        out_device = td.device if td.device is not None else obs.device
+        action, _ = self.actor(
+            obs.to(actor_device),
+            desired_goal.to(actor_device),
+            deterministic=self.deterministic,
+        )
+        td["action"] = action.to(out_device)
         return td
 
 

@@ -2,7 +2,10 @@ import argparse
 import json
 
 import pytest
+import torch
+from tensordict import TensorDict
 
+from src.algo import PolicyModule, SquashedGaussianSACActor
 from train import build_parser, parse_args, train
 
 
@@ -195,3 +198,58 @@ def test_train_resume(tmp_path):
     )
     summary2 = train(args2)
     assert summary2["total_frames"] >= 50
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_policy_module_device_mismatch():
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16).to("cuda")
+    policy = PolicyModule(actor)
+    td = TensorDict(
+        {"obs": torch.randn(2, 55), "desired_goal": torch.randn(2, 4)},
+        batch_size=[2],
+        device="cpu",
+    )
+    out_td = policy(td)
+    assert "action" in out_td
+    assert out_td["action"].device == torch.device("cpu")
+    assert out_td["action"].shape == (2, 16)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_train_cuda_short_run(tmp_path):
+    ckpt_dir = tmp_path / "checkpoints_cuda"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "50",
+            "--frames-per-batch",
+            "50",
+            "--storage-size",
+            "200",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "50",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "50",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--device",
+            "cuda",
+        ]
+    )
+    summary = train(args)
+    assert isinstance(summary, dict)
+    assert summary["total_frames"] >= 50
+    assert "best_success_rate" in summary
+    assert ckpt_dir.is_dir()
+    assert (ckpt_dir / "metrics_summary.json").is_file()
+

@@ -69,7 +69,9 @@ def evaluate_policy(
 
                     geo_err = quat_geodesic_distance(
                         achieved_goal.unsqueeze(0) if achieved_goal.ndim == 1 else achieved_goal,
-                        desired_goal.unsqueeze(0) if desired_goal.ndim == 1 else desired_goal,
+                        desired_goal.to(achieved_goal.device).unsqueeze(0)
+                        if desired_goal.ndim == 1
+                        else desired_goal.to(achieved_goal.device),
                     ).mean().item()
                     all_geodesic_errors.append(geo_err)
 
