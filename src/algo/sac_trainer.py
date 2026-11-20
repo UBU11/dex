@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 from torch import nn
+from torchrl.data import TensorDictReplayBuffer
 
 from src.algo.actor import SquashedGaussianSACActor
 from src.algo.critic import TwinContinuousQCritic
@@ -209,6 +210,28 @@ class SACTrainer:
 
     def update_target_network(self) -> None:
         self.loss.update_target_network()
+
+    def train_step_from_buffer(
+        self,
+        replay_buffer: TensorDictReplayBuffer,
+        batch_size: int | None = None,
+    ) -> tuple[dict[str, float], float]:
+        """Samples from replay buffer, computes positive reward ratio, and performs training step."""
+        if batch_size is not None:
+            batch = replay_buffer.sample(batch_size)
+        else:
+            batch = replay_buffer.sample()
+
+        if ("next", "reward") in batch.keys(True):
+            reward = batch["next", "reward"]
+        elif "reward" in batch:
+            reward = batch["reward"]
+        else:
+            reward = batch["next"]["reward"]
+
+        pos_ratio = (reward == 0.0).float().mean().item()
+        metrics = self.step(batch)
+        return metrics, pos_ratio
 
     def step(self, batch: TensorDict) -> dict[str, float]:
         batch = batch.to(self.device)

@@ -169,6 +169,8 @@ def create_her_replay_buffer(
     drop_z_threshold: float = 0.04,
 ) -> TensorDictReplayBuffer:
     """Creates a TensorDictReplayBuffer configured with SliceSampler and VectorizedFutureHER transform."""
+    if batch_size % slice_len != 0:
+        batch_size = max(slice_len, (batch_size // slice_len) * slice_len)
     storage = LazyTensorStorage(max_size=storage_size)
     sampler = SliceSampler(slice_len=slice_len, traj_key=("collector", "traj_ids"))
     transform = VectorizedFutureHER(

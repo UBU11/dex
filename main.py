@@ -1,80 +1,82 @@
-"""Dexterous In-Hand Cube Reorientation: Policy Rollout Demonstration."""
+"""Dexterous In-Hand Cube Reorientation: Policy Rollout & Sparse HER Training Demonstration."""
 
 import torch
 
-from src.algo import SquashedGaussianSACActor
+from src.algo import (
+    PolicyModule,
+    SACTrainer,
+    SquashedGaussianSACActor,
+    TwinContinuousQCritic,
+    create_her_replay_buffer,
+    create_trajectory_collector,
+)
 from src.envs import LeapCubeReorientEnv
-from src.utils import quat_geodesic_distance
 
 
 def main() -> None:
-    """Runs a 50-step rollout loop executing SquashedGaussianSACActor in LeapCubeReorientEnv."""
+    """Runs full SO(3) sparse reorientation trajectory collection, HER relabeling, and SAC training."""
     print("=" * 80)
-    print("Dexterous In-Hand Cube Reorientation: 50-Step Policy Rollout")
+    print("Dexterous In-Hand Cube Reorientation: Full SO(3) Sparse HER Training Demonstration")
     print("=" * 80)
 
-    # 1. Instantiate environment and actor policy
-    print("Instantiating LeapCubeReorientEnv(max_steps=50)...")
-    env = LeapCubeReorientEnv(max_steps=50)
-
-    print("Instantiating SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)...")
+    # 1. Instantiate environment, policy, critic, and trainer
+    print("Initializing full SO(3) sparse LeapCubeReorientEnv and SAC models...")
+    env_fn = lambda: LeapCubeReorientEnv(
+        max_steps=20,
+        target_mode="so3",
+        reward_mode="sparse",
+    )
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    critic = TwinContinuousQCritic(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    trainer = SACTrainer(actor=actor, critic=critic)
 
-    # 2. Reset environment to obtain initial observation TensorDict
-    td = env.reset()
+    # 2. Configure HER replay buffer
+    print("Configuring HER replay buffer (storage_size=2000, slice_len=20)...")
+    replay_buffer = create_her_replay_buffer(storage_size=2000, slice_len=20)
 
-    print("\nStarting 50-step rollout loop:")
+    # 3. Create trajectory collector
+    print("Creating SyncDataCollector with trajectory write mode...")
+    collector = create_trajectory_collector(
+        env_fn=env_fn,
+        policy=policy,
+        replay_buffer=replay_buffer,
+        frames_per_batch=100,
+        total_frames=200,
+    )
+
+    print("Collecting trajectories into HER replay buffer...")
+    try:
+        for _ in collector:
+            pass
+    finally:
+        collector.shutdown()
+
+    print(f"Total transitions stored in replay buffer: {len(replay_buffer)}")
+
+    # 4. Perform SAC training steps from HER replay buffer
+    print("\nExecuting SAC training steps from HER replay buffer:")
     header = (
-        f"{'Step':>4} | {'Geodesic Error θ (rad)':>22} | "
-        f"{'Reward':>8} | {'Streak':>6} | {'Consecutive Successes':>21}"
+        f"{'Step':>4} | {'Loss Critic':>12} | {'Loss Actor':>12} | "
+        f"{'Loss Alpha':>12} | {'Alpha':>8} | {'Pos Reward %':>12}"
     )
     print(header)
     print("-" * len(header))
 
-    # 3. Rollout loop
-    for step in range(50):
-        obs = td["obs"]
-        desired_goal = td["desired_goal"]
+    for step in range(5):
+        metrics, pos_ratio = trainer.train_step_from_buffer(replay_buffer, batch_size=200)
 
-        # Policy inference (deterministic action evaluation)
-        with torch.no_grad():
-            action, _ = actor(obs, desired_goal, deterministic=True)
-
-        # Step environment
-        td["action"] = action
-        step_td = env.step(td)
-        next_td = step_td["next"]
-
-        # Compute geodesic angular distance θ ∈ [0, π]
-        achieved_goal = next_td["achieved_goal"]
-        current_desired = next_td["desired_goal"]
-        angle_err = quat_geodesic_distance(achieved_goal, current_desired).item()
-        reward = next_td["reward"].item()
-        consecutive_successes = env.consecutive_successes
-        streak = env._success_streak
-
-        # Verify no NaNs or Infs
-        assert torch.isfinite(next_td["obs"]).all(), f"NaN/Inf detected in obs at step {step + 1}"
-        assert torch.isfinite(torch.tensor(angle_err)), (
-            f"NaN/Inf detected in angle error at step {step + 1}"
-        )
-        assert torch.isfinite(next_td["reward"]).all(), (
-            f"NaN/Inf detected in reward at step {step + 1}"
-        )
+        # Assert no NaNs
+        assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())
+        assert torch.isfinite(torch.tensor(pos_ratio))
 
         print(
-            f"{step + 1:>4} | {angle_err:>22.4f} | {reward:>8.1f} | "
-            f"{streak:>6} | {consecutive_successes:>21}"
+            f"{step + 1:>4} | {metrics['loss_critic']:>12.4f} | {metrics['loss_actor']:>12.4f} | "
+            f"{metrics['loss_alpha']:>12.4f} | {metrics['alpha']:>8.4f} | {pos_ratio * 100:>11.1f}%"
         )
 
-        td = next_td
-        if next_td["done"].item():
-            print(f"\nEpisode reached terminal boundary at step {step + 1} (done=True).")
-            break
-
     print("-" * len(header))
-    print("Rollout completed successfully without errors or NaNs.")
-    print(f"Total chained target reorientations achieved: {env.consecutive_successes}")
+    print("HER training demonstration completed successfully without errors or NaNs.")
     print("=" * 80)
 
 
