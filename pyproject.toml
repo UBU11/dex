@@ -1,11 +1,20 @@
 [project]
 name = "dexterous"
 version = "0.1.0"
-description = "Add your description here"
+description = "Dexterous In-Hand Cube Reorientation (SAC + HER) in MuJoCo"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "mujoco-menagerie>=2026.11.3",
-    "mujoco-warp>=4.0.1",
+    "mujoco>=3.4",
+    "mujoco-menagerie>=2026.9.0",
+    "tensordict>=0.15.2",
     "torch>=2.15.0",
+    "torchrl>=0.15.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.0",
+    "ruff>=0.17.0",
+]
+
