@@ -64,14 +64,12 @@ def evaluate_policy(
 
                     if ("next", "achieved_goal") in next_td.keys(True):
                         achieved_goal = next_td["next", "achieved_goal"]
-                        next_desired_goal = next_td["next", "desired_goal"]
                     else:
                         achieved_goal = next_td["achieved_goal"]
-                        next_desired_goal = next_td["desired_goal"]
 
                     geo_err = quat_geodesic_distance(
                         achieved_goal.unsqueeze(0) if achieved_goal.ndim == 1 else achieved_goal,
-                        next_desired_goal.unsqueeze(0) if next_desired_goal.ndim == 1 else next_desired_goal,
+                        desired_goal.unsqueeze(0) if desired_goal.ndim == 1 else desired_goal,
                     ).mean().item()
                     all_geodesic_errors.append(geo_err)
 

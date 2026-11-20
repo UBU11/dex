@@ -23,5 +23,7 @@ dev = [
 pythonpath = ["."]
 filterwarnings = [
     "ignore::DeprecationWarning:torchrl.*",
+    "ignore::DeprecationWarning:torch.onnx.*",
+    "ignore:.*TorchScript-based ONNX export.*:DeprecationWarning",
 ]
 

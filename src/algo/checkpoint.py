@@ -130,23 +130,27 @@ def export_policy_onnx(
         else next(actor.parameters(), torch.tensor(0.0)).device
     )
 
-    wrapper = _DeterministicPolicyWrapper(actor).to(target_device)
-    wrapper.eval()
+    was_training = actor.training
+    try:
+        wrapper = _DeterministicPolicyWrapper(actor).to(target_device)
+        wrapper.eval()
 
-    dummy_obs = torch.randn(1, obs_dim, device=target_device)
-    dummy_goal = torch.randn(1, goal_dim, device=target_device)
+        dummy_obs = torch.randn(1, obs_dim, device=target_device)
+        dummy_goal = torch.randn(1, goal_dim, device=target_device)
 
-    torch.onnx.export(
-        wrapper,
-        (dummy_obs, dummy_goal),
-        str(path),
-        dynamo=False,
-        input_names=["obs", "desired_goal"],
-        output_names=["action"],
-        dynamic_axes={
-            "obs": {0: "batch_size"},
-            "desired_goal": {0: "batch_size"},
-            "action": {0: "batch_size"},
-        },
-        opset_version=17,
-    )
+        torch.onnx.export(
+            wrapper,
+            (dummy_obs, dummy_goal),
+            str(path),
+            dynamo=False,
+            input_names=["obs", "desired_goal"],
+            output_names=["action"],
+            dynamic_axes={
+                "obs": {0: "batch_size"},
+                "desired_goal": {0: "batch_size"},
+                "action": {0: "batch_size"},
+            },
+            opset_version=17,
+        )
+    finally:
+        actor.train(was_training)

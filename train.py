@@ -179,7 +179,10 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     if train_ctrl is not None:
                         train_ctrl.set_difficulty(new_diff)
 
-                if last_eval_metrics["success_rate"] >= best_success_rate:
+                is_new_best = (last_eval_metrics["success_rate"] > best_success_rate) or (
+                    best_success_rate == 0.0 and not (ckpt_dir / "best_model.pt").exists()
+                )
+                if is_new_best:
                     best_success_rate = last_eval_metrics["success_rate"]
                     best_ckpt = ckpt_dir / "best_model.pt"
                     save_checkpoint(
@@ -192,7 +195,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                         best_success_rate=best_success_rate,
                         extra_info={"eval_metrics": last_eval_metrics},
                     )
-                    saved_checkpoints.append(str(best_ckpt))
+                    best_ckpt_str = str(best_ckpt)
+                    if best_ckpt_str not in saved_checkpoints:
+                        saved_checkpoints.append(best_ckpt_str)
 
                     best_onnx = ckpt_dir / "best_policy.onnx"
                     export_policy_onnx(
