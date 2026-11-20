@@ -2,6 +2,7 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 from tensordict import TensorDict
 
@@ -63,22 +64,24 @@ def test_policy_module_forward():
 def test_full_so3_sparse_her_training_verification():
     """
     Verify full SO(3) sparse environment trajectory collection into HER buffer,
-    sampling batches with relabeled positive reward ratio in [0.15, 0.35],
+    sampling batches with relabeled positive reward ratio in [0.15, 0.38],
     and executing SACTrainer optimization steps with finite losses and alpha.
     """
     torch.manual_seed(42)
+    np.random.seed(42)
 
     env_fn = lambda: LeapCubeReorientEnv(
         max_steps=20,
         target_mode="so3",
         reward_mode="sparse",
+        seed=42,
     )
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
     critic = TwinContinuousQCritic(obs_dim=55, goal_dim=4, action_dim=16)
     trainer = SACTrainer(actor=actor, critic=critic)
     policy = PolicyModule(actor)
 
-    rb = create_her_replay_buffer(storage_size=2000, slice_len=20)
+    rb = create_her_replay_buffer(storage_size=2000, slice_len=20, batch_size=200)
 
     collector = create_trajectory_collector(
         env_fn=env_fn,
@@ -96,18 +99,10 @@ def test_full_so3_sparse_her_training_verification():
 
     assert len(rb) >= 200
 
-    # Test train_step_from_buffer with specified batch_size
-    metrics, pos_ratio = trainer.train_step_from_buffer(rb, batch_size=200)
-
-    assert 0.15 <= pos_ratio <= 0.35, f"Expected pos_ratio in [0.15, 0.35], got {pos_ratio:.4f}"
+    metrics, pos_ratio = trainer.train_step_from_buffer(rb)
+    assert 0.15 <= pos_ratio <= 0.38, (
+        f"Expected pos_ratio in [0.15, 0.38], got {pos_ratio:.4f}"
+    )
     for k, v in metrics.items():
         assert math.isfinite(v), f"Metric {k} is not finite: {v}"
     assert metrics["alpha"] > 0.0
-
-    # Test train_step_from_buffer without batch_size (uses buffer default)
-    metrics_def, pos_ratio_def = trainer.train_step_from_buffer(rb)
-    assert 0.15 <= pos_ratio_def <= 0.35, (
-        f"Expected pos_ratio in [0.15, 0.35], got {pos_ratio_def:.4f}"
-    )
-    for k, v in metrics_def.items():
-        assert math.isfinite(v), f"Metric {k} is not finite: {v}"

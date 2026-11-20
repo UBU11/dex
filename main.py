@@ -32,8 +32,10 @@ def main() -> None:
     trainer = SACTrainer(actor=actor, critic=critic)
 
     # 2. Configure HER replay buffer
-    print("Configuring HER replay buffer (storage_size=2000, slice_len=20)...")
-    replay_buffer = create_her_replay_buffer(storage_size=2000, slice_len=20)
+    print("Configuring HER replay buffer (storage_size=2000, slice_len=20, batch_size=200)...")
+    replay_buffer = create_her_replay_buffer(
+        storage_size=2000, slice_len=20, batch_size=200
+    )
 
     # 3. Create trajectory collector
     print("Creating SyncDataCollector with trajectory write mode...")
@@ -64,7 +66,7 @@ def main() -> None:
     print("-" * len(header))
 
     for step in range(5):
-        metrics, pos_ratio = trainer.train_step_from_buffer(replay_buffer, batch_size=200)
+        metrics, pos_ratio = trainer.train_step_from_buffer(replay_buffer)
 
         # Assert no NaNs
         assert all(torch.isfinite(torch.tensor(v)) for v in metrics.values())

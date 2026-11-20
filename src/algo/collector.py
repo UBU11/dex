@@ -38,7 +38,7 @@ def create_trajectory_collector(
     frames_per_batch: int,
     total_frames: int = -1,
     **kwargs: Any,
-) -> Any:
+) -> Collector:
     """Creates a SyncDataCollector configured for trajectory-mode writing into replay buffer."""
     collector_kwargs = {
         "replay_write_mode": "trajectory",

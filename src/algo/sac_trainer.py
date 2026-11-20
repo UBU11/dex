@@ -77,7 +77,7 @@ class SACLoss(nn.Module):
         else:
             next_desired_goal = desired_goal
 
-        if ("next", "reward") in batch.keys(True):
+        if ("next", "reward") in batch:
             reward = batch["next", "reward"]
         else:
             reward = batch["reward"]
@@ -222,7 +222,7 @@ class SACTrainer:
         else:
             batch = replay_buffer.sample()
 
-        if ("next", "reward") in batch.keys(True):
+        if ("next", "reward") in batch:
             reward = batch["next", "reward"]
         elif "reward" in batch:
             reward = batch["reward"]
