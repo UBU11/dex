@@ -7,7 +7,7 @@ from tensordict import TensorDict
 from torchrl.data import Bounded, Categorical, Composite, Unbounded
 from torchrl.envs import EnvBase
 
-from src.envs.domain_randomization import DomainRandomizer
+from src.envs.domain_randomization import ADRCurriculumController, DomainRandomizer
 from src.envs.pd_controller import PDController
 from src.envs.spec import (
     DEFAULT_CUBE_POS,
@@ -54,7 +54,9 @@ class LeapCubeReorientEnv(EnvBase):
         target_mode: str = "so3",
         reward_mode: str = "sparse",
         action_penalty_weight: float = 0.01,
-        domain_randomization: bool = True,
+        enable_domain_randomization: bool = False,
+        randomizer: DomainRandomizer | None = None,
+        domain_randomization: bool | None = None,
         seed: int | None = None,
         device: torch.device | None = None,
     ) -> None:
@@ -75,7 +77,12 @@ class LeapCubeReorientEnv(EnvBase):
         self.target_mode = target_mode
         self.reward_mode = reward_mode
         self.action_penalty_weight = action_penalty_weight
-        self.domain_randomization = domain_randomization
+
+        if domain_randomization is not None:
+            enable_domain_randomization = domain_randomization
+
+        self.enable_domain_randomization = enable_domain_randomization
+        self.domain_randomization = enable_domain_randomization
 
         # ponytail: compile MjSpec on demand if raw model is not supplied
         if model is None:
@@ -91,9 +98,21 @@ class LeapCubeReorientEnv(EnvBase):
 
         self.data = mujoco.MjData(self.model) if data is None else data
 
-        # Low-level PD controller and domain randomizer
+        # Low-level PD controller
         self.pd_controller = PDController(self.model)
-        self.domain_randomizer = DomainRandomizer(self.model, self.data)
+
+        if self.enable_domain_randomization:
+            if randomizer is None:
+                randomizer = DomainRandomizer(self.model, self.data)
+            self.randomizer: DomainRandomizer | None = randomizer
+            self.curriculum_controller: ADRCurriculumController | None = (
+                ADRCurriculumController(self.randomizer)
+            )
+        else:
+            self.randomizer = None
+            self.curriculum_controller = None
+
+        self.domain_randomizer = self.randomizer
 
         # Episode state variables
         self.current_step = 0
@@ -150,6 +169,16 @@ class LeapCubeReorientEnv(EnvBase):
         if seed is not None:
             torch.manual_seed(seed)
 
+    def _get_obs(self) -> np.ndarray:
+        qpos_hand = self.data.qpos[:16].astype(np.float32)
+        qvel_hand = self.data.qvel[:16].astype(np.float32)
+        cube_p = self.data.qpos[16:19].astype(np.float32)
+        cube_q = self.data.qpos[19:23].astype(np.float32)
+        raw_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, self.prev_action])
+        if self.enable_domain_randomization and self.randomizer is not None:
+            return self.randomizer.get_delayed_observation(raw_obs, rng=self.np_rng)
+        return raw_obs
+
     def _sample_goal(self) -> torch.Tensor:
         if self.target_mode == "yaw":
             return sample_yaw_quat(1, device=self.device)[0]
@@ -157,11 +186,8 @@ class LeapCubeReorientEnv(EnvBase):
 
     def _reset(self, tensordict: TensorDict | None = None, **kwargs) -> TensorDict:
         """Resets hand posture, cube with XY offset, desired goal, and latency queue."""
-        # ponytail: randomize or restore nominal domain parameters on reset
-        if self.domain_randomization:
-            self.domain_randomizer.randomize(self.np_rng)
-        else:
-            self.domain_randomizer.reset_to_nominal()
+        if self.enable_domain_randomization and self.randomizer is not None:
+            self.randomizer.randomize(self.np_rng)
 
         # Reset hand joint angles and actuator controls to cradle posture
         self.data.qpos[:16] = DEFAULT_HAND_QPOS
@@ -194,15 +220,16 @@ class LeapCubeReorientEnv(EnvBase):
         qvel_hand = self.data.qvel[:16].astype(np.float32)
         cube_p = self.data.qpos[16:19].astype(np.float32)
         cube_q = self.data.qpos[19:23].astype(np.float32)
-        raw_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, self.prev_action])
+        initial_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, self.prev_action])
 
-        # Reset latency FIFO queue
-        self.domain_randomizer.reset_latency()
-        delayed_obs = self.domain_randomizer.get_delayed_observation(raw_obs)
+        if self.enable_domain_randomization and self.randomizer is not None:
+            self.randomizer.reset_latency(initial_obs)
+
+        obs = self._get_obs()
 
         return TensorDict(
             {
-                "obs": torch.as_tensor(delayed_obs, device=self.device, dtype=torch.float32),
+                "obs": torch.as_tensor(obs, device=self.device, dtype=torch.float32),
                 "desired_goal": self.desired_goal.clone(),
                 "achieved_goal": torch.as_tensor(cube_q, device=self.device, dtype=torch.float32),
                 "prev_action": torch.as_tensor(self.prev_action, device=self.device, dtype=torch.float32),
@@ -225,17 +252,13 @@ class LeapCubeReorientEnv(EnvBase):
             max_delta=self.max_delta,
         )
 
-        # Extract current state from MuJoCo data
-        qpos_hand = self.data.qpos[:16].astype(np.float32)
-        qvel_hand = self.data.qvel[:16].astype(np.float32)
-        cube_p = self.data.qpos[16:19].astype(np.float32)
-        cube_q = self.data.qpos[19:23].astype(np.float32)
         current_act = np.clip(action_np, -1.0, 1.0).astype(np.float32)
         self.prev_action = current_act
 
-        raw_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, current_act])
-        delayed_obs = self.domain_randomizer.get_delayed_observation(raw_obs)
+        obs = self._get_obs()
 
+        cube_p = self.data.qpos[16:19].astype(np.float32)
+        cube_q = self.data.qpos[19:23].astype(np.float32)
         achieved_goal = torch.as_tensor(cube_q, device=self.device, dtype=torch.float32)
         cube_z = torch.as_tensor([cube_p[2]], device=self.device, dtype=torch.float32)
 
@@ -276,7 +299,7 @@ class LeapCubeReorientEnv(EnvBase):
 
         return TensorDict(
             {
-                "obs": torch.as_tensor(delayed_obs, device=self.device, dtype=torch.float32),
+                "obs": torch.as_tensor(obs, device=self.device, dtype=torch.float32),
                 "desired_goal": self.desired_goal.clone(),
                 "achieved_goal": achieved_goal,
                 "prev_action": torch.as_tensor(current_act, device=self.device, dtype=torch.float32),

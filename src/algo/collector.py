@@ -37,9 +37,38 @@ def create_trajectory_collector(
     replay_buffer: TensorDictReplayBuffer,
     frames_per_batch: int,
     total_frames: int = -1,
+    enable_domain_randomization: bool = False,
     **kwargs: Any,
 ) -> Collector:
     """Creates a SyncDataCollector configured for trajectory-mode writing into replay buffer."""
+    if enable_domain_randomization:
+        original_env_fn = env_fn
+
+        def wrapped_env_fn() -> EnvBase:
+            try:
+                return original_env_fn(enable_domain_randomization=True)
+            except TypeError:
+                env = original_env_fn()
+                if (
+                    hasattr(env, "enable_domain_randomization")
+                    and not env.enable_domain_randomization
+                ):
+                    env.enable_domain_randomization = True
+                    if getattr(env, "randomizer", None) is None:
+                        from src.envs.domain_randomization import (
+                            ADRCurriculumController,
+                            DomainRandomizer,
+                        )
+
+                        env.randomizer = DomainRandomizer(env.model, env.data)
+                        env.curriculum_controller = ADRCurriculumController(
+                            env.randomizer
+                        )
+                        env.domain_randomizer = env.randomizer
+                return env
+
+        env_fn = wrapped_env_fn
+
     collector_kwargs = {
         "replay_write_mode": "trajectory",
         "auto_register_policy_transforms": False,
