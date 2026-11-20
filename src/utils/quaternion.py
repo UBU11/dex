@@ -47,6 +47,26 @@ def compute_sparse_her_reward(
     return reward, is_success
 
 
+def compute_dense_orientation_reward(
+    q_achieved: torch.Tensor,
+    q_desired: torch.Tensor,
+    action: torch.Tensor,
+    action_penalty_weight: float = 0.01,
+) -> torch.Tensor:
+    """
+    Computes dense negative orientation tracking reward with action L2 penalty:
+    r_t = -theta(q_achieved, q_desired) - action_penalty_weight * ||a_t||^2
+    """
+    theta = quat_geodesic_distance(q_achieved, q_desired)
+    action_t = (
+        action
+        if isinstance(action, torch.Tensor)
+        else torch.as_tensor(action, device=theta.device, dtype=theta.dtype)
+    )
+    action_norm_sq = torch.sum(action_t**2, dim=-1, keepdim=True)
+    return -theta - action_penalty_weight * action_norm_sq
+
+
 def sample_uniform_quat(
     batch_size: int, device: torch.device | None = None
 ) -> torch.Tensor:
@@ -66,3 +86,24 @@ def sample_uniform_quat(
     y = torch.sqrt(u1) * torch.sin(2.0 * math.pi * u3)
     z = torch.sqrt(u1) * torch.cos(2.0 * math.pi * u3)
     return torch.stack([w, x, y, z], dim=-1)
+
+
+def sample_yaw_quat(
+    batch_size: int, device: torch.device | None = None
+) -> torch.Tensor:
+    """
+    Samples single-axis Z-yaw random quaternions [cos(psi/2), 0, 0, sin(psi/2)] for psi in [-pi, pi].
+    Returns:
+        Tensor of shape (batch_size, 4) in [w, x, y, z] convention.
+    """
+    if batch_size <= 0:
+        return torch.empty((0, 4), device=device)
+
+    psi = (torch.rand((batch_size,), device=device) * 2.0 - 1.0) * math.pi
+    half_psi = psi * 0.5
+    w = torch.cos(half_psi)
+    x = torch.zeros_like(w)
+    y = torch.zeros_like(w)
+    z = torch.sin(half_psi)
+    return torch.stack([w, x, y, z], dim=-1)
+

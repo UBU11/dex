@@ -15,7 +15,12 @@ from src.envs.spec import (
     DEFAULT_HAND_QPOS,
     build_leap_cube_spec,
 )
-from src.utils.quaternion import compute_sparse_her_reward, sample_uniform_quat
+from src.utils.quaternion import (
+    compute_dense_orientation_reward,
+    compute_sparse_her_reward,
+    sample_uniform_quat,
+    sample_yaw_quat,
+)
 
 
 class LeapCubeReorientEnv(EnvBase):
@@ -24,7 +29,8 @@ class LeapCubeReorientEnv(EnvBase):
     Features:
     - 20 Hz control via 10 substeps of low-level PD tracking at 200 Hz.
     - Continuous bounded action [-1.0, 1.0] mapped to relative delta targets [-0.15, 0.15] rad.
-    - Sparse binary HER reward (0.0 on success, -1.0 otherwise).
+    - Sparse binary HER reward (0.0 on success, -1.0 otherwise) or dense negative reward.
+    - SO(3) or single-axis Z-yaw target modes.
     - No alive-penalty suicide: Fixed episode horizon without premature drop termination.
     - Consecutive goal chaining: In-place new target sampling after 5 consecutive successful steps.
     - Domain randomization for cube mass, surface friction, joint damping, and latency.
@@ -45,11 +51,19 @@ class LeapCubeReorientEnv(EnvBase):
         drop_z_threshold: float = 0.04,
         consecutive_steps_for_success: int = 5,
         xy_offset_range: float = 0.015,
+        target_mode: str = "so3",
+        reward_mode: str = "sparse",
+        action_penalty_weight: float = 0.01,
         domain_randomization: bool = True,
         seed: int | None = None,
         device: torch.device | None = None,
     ) -> None:
         super().__init__(device=device, batch_size=torch.Size([]))
+
+        if target_mode not in ("so3", "yaw"):
+            raise ValueError(f"Invalid target_mode '{target_mode}'. Expected 'so3' or 'yaw'.")
+        if reward_mode not in ("sparse", "dense"):
+            raise ValueError(f"Invalid reward_mode '{reward_mode}'. Expected 'sparse' or 'dense'.")
 
         self.max_steps = max_steps
         self.n_substeps = n_substeps
@@ -58,6 +72,9 @@ class LeapCubeReorientEnv(EnvBase):
         self.drop_z_threshold = drop_z_threshold
         self.consecutive_steps_for_success = consecutive_steps_for_success
         self.xy_offset_range = xy_offset_range
+        self.target_mode = target_mode
+        self.reward_mode = reward_mode
+        self.action_penalty_weight = action_penalty_weight
         self.domain_randomization = domain_randomization
 
         # ponytail: compile MjSpec on demand if raw model is not supplied
@@ -133,6 +150,11 @@ class LeapCubeReorientEnv(EnvBase):
         if seed is not None:
             torch.manual_seed(seed)
 
+    def _sample_goal(self) -> torch.Tensor:
+        if self.target_mode == "yaw":
+            return sample_yaw_quat(1, device=self.device)[0]
+        return sample_uniform_quat(1, device=self.device)[0]
+
     def _reset(self, tensordict: TensorDict | None = None, **kwargs) -> TensorDict:
         """Resets hand posture, cube with XY offset, desired goal, and latency queue."""
         # ponytail: randomize or restore nominal domain parameters on reset
@@ -164,8 +186,8 @@ class LeapCubeReorientEnv(EnvBase):
         self._success_streak = 0
         self.prev_action = np.zeros(16, dtype=np.float32)
 
-        # Sample initial uniform SO(3) target quaternion
-        self.desired_goal = sample_uniform_quat(1, device=self.device)[0]
+        # Sample initial target quaternion based on target_mode
+        self.desired_goal = self._sample_goal()
 
         # Initial raw observation vector
         qpos_hand = self.data.qpos[:16].astype(np.float32)
@@ -218,7 +240,7 @@ class LeapCubeReorientEnv(EnvBase):
         cube_z = torch.as_tensor([cube_p[2]], device=self.device, dtype=torch.float32)
 
         # Compute sparse binary HER reward and success flag
-        reward, is_success = compute_sparse_her_reward(
+        sparse_reward, is_success = compute_sparse_her_reward(
             achieved_goal,
             self.desired_goal,
             cube_z,
@@ -226,13 +248,23 @@ class LeapCubeReorientEnv(EnvBase):
             drop_z_threshold=self.drop_z_threshold,
         )
 
+        if self.reward_mode == "dense":
+            reward = compute_dense_orientation_reward(
+                achieved_goal,
+                self.desired_goal,
+                action,
+                action_penalty_weight=self.action_penalty_weight,
+            )
+        else:
+            reward = sparse_reward
+
         # ponytail: consecutive goal chaining without resetting hand or cube
         if bool(is_success.squeeze()):
             self._success_streak += 1
             if self._success_streak >= self.consecutive_steps_for_success:
                 self.consecutive_successes += 1
                 self._success_streak = 0
-                self.desired_goal = sample_uniform_quat(1, device=self.device)[0]
+                self.desired_goal = self._sample_goal()
         else:
             self._success_streak = 0
 

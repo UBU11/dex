@@ -8,9 +8,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.utils.quaternion import (
+    compute_dense_orientation_reward,
     compute_sparse_her_reward,
     quat_geodesic_distance,
     sample_uniform_quat,
+    sample_yaw_quat,
 )
 
 
@@ -176,7 +178,66 @@ def test_package_exports():
 
     assert hasattr(utils, "quat_geodesic_distance")
     assert hasattr(utils, "compute_sparse_her_reward")
+    assert hasattr(utils, "compute_dense_orientation_reward")
     assert hasattr(utils, "sample_uniform_quat")
+    assert hasattr(utils, "sample_yaw_quat")
+
+
+def test_sample_yaw_quat_shape_and_constraints():
+    """Single-axis Z-yaw sampling outputs unit quaternions with x=0, y=0 and shape (B, 4)."""
+    batch_size = 256
+    device = torch.device("cpu")
+    quats = sample_yaw_quat(batch_size, device=device)
+
+    assert quats.shape == (batch_size, 4)
+    assert quats.device == device
+
+    norms = torch.linalg.norm(quats, dim=-1)
+    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
+
+    assert torch.allclose(quats[:, 1], torch.zeros_like(quats[:, 1]), atol=1e-6)
+    assert torch.allclose(quats[:, 2], torch.zeros_like(quats[:, 2]), atol=1e-6)
+
+    # Angle psi covers non-zero range
+    assert quats[:, 0].var() > 1e-4
+    assert quats[:, 3].var() > 1e-4
+
+    empty = sample_yaw_quat(0)
+    assert empty.shape == (0, 4)
+
+
+def test_compute_dense_orientation_reward():
+    """Dense orientation reward computes -theta - 0.01 * ||a||^2 accurately."""
+    q_achieved = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    q_desired = torch.tensor([[math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0]])
+    action = torch.zeros((1, 16))
+    action[0, 0] = 1.0
+    action[0, 1] = 1.0
+
+    reward = compute_dense_orientation_reward(q_achieved, q_desired, action, action_penalty_weight=0.01)
+    expected = -(math.pi / 2) - 0.01 * 2.0
+    assert torch.isclose(reward, torch.tensor([[expected]]), atol=2e-3)
+
+    # Custom action penalty weight
+    reward_custom = compute_dense_orientation_reward(
+        q_achieved, q_desired, action, action_penalty_weight=0.05
+    )
+    expected_custom = -(math.pi / 2) - 0.05 * 2.0
+    assert torch.isclose(reward_custom, torch.tensor([[expected_custom]]), atol=2e-3)
+
+    # Batched inputs
+    q_achieved_b = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    q_desired_b = torch.tensor(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [math.cos(math.pi / 4), math.sin(math.pi / 4), 0.0, 0.0],
+        ]
+    )
+    action_b = torch.zeros((2, 16))
+    rewards_b = compute_dense_orientation_reward(q_achieved_b, q_desired_b, action_b)
+    assert rewards_b.shape == (2, 1)
+    assert torch.isclose(rewards_b[0, 0], torch.tensor(0.0), atol=2e-3)
+    assert torch.isclose(rewards_b[1, 0], torch.tensor(-math.pi / 2), atol=2e-3)
 
 
 def test_random_quaternion_double_cover_and_batch_dims():

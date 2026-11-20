@@ -325,3 +325,52 @@ def test_leap_cube_env_configurable_drop_z_threshold():
     step_out_2 = env.step(next_td)
     assert step_out_2["next", "reward"].item() == 0.0
 
+
+def test_leap_cube_env_yaw_target_and_dense_reward():
+    """Verify LeapCubeReorientEnv with target_mode='yaw' and reward_mode='dense'."""
+    from src.utils.quaternion import quat_geodesic_distance
+
+    env = LeapCubeReorientEnv(
+        max_steps=50,
+        target_mode="yaw",
+        reward_mode="dense",
+        action_penalty_weight=0.01,
+        domain_randomization=False,
+        seed=42,
+    )
+    assert env.target_mode == "yaw"
+    assert env.reward_mode == "dense"
+
+    td = env.reset()
+    desired_goal = td["desired_goal"]
+    # Single-axis Z-yaw target must have x=0 and y=0
+    assert torch.isclose(desired_goal[1], torch.tensor(0.0), atol=1e-6)
+    assert torch.isclose(desired_goal[2], torch.tensor(0.0), atol=1e-6)
+    assert math.isclose(torch.norm(desired_goal, p=2).item(), 1.0, rel_tol=1e-5)
+
+    action = torch.ones(16, dtype=torch.float32) * 0.5
+    td["action"] = action
+    step_out = env.step(td)
+    next_td = step_out["next"]
+
+    reward = next_td["reward"].item()
+    achieved = next_td["achieved_goal"]
+    desired = next_td["desired_goal"]
+    theta = quat_geodesic_distance(achieved, desired).item()
+    penalty = 0.01 * (0.5**2 * 16)
+    expected_reward = -theta - penalty
+    assert math.isclose(reward, expected_reward, rel_tol=1e-4)
+    assert reward < 0.0
+
+
+def test_leap_cube_env_invalid_target_and_reward_modes():
+    """Verify ValueError is raised for invalid target_mode or reward_mode."""
+    import pytest
+
+    with pytest.raises(ValueError, match="target_mode"):
+        LeapCubeReorientEnv(target_mode="invalid")
+
+    with pytest.raises(ValueError, match="reward_mode"):
+        LeapCubeReorientEnv(reward_mode="invalid")
+
+
