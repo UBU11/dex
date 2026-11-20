@@ -277,3 +277,51 @@ def test_consecutive_goal_chaining_in_place():
             np.testing.assert_allclose(env.data.qpos[:16], hand_qpos_before, atol=0.05)
             # New desired goal in next TensorDict matches env.desired_goal
             assert torch.allclose(current_td["desired_goal"], env.desired_goal)
+
+
+def test_leap_cube_env_clipped_prev_action():
+    """Verify out-of-bounds actions are clipped to [-1, 1] when stored into prev_action."""
+    env = LeapCubeReorientEnv(max_steps=50, domain_randomization=False, seed=42)
+    td = env.reset()
+
+    # Provide unclipped action values outside [-1.0, 1.0]
+    unclipped_action = torch.tensor([5.0, -10.0, 2.5, -3.0] + [0.0] * 12, dtype=torch.float32)
+    td["action"] = unclipped_action
+    step_out = env.step(td)
+
+    next_td = step_out["next"]
+    # Returned prev_action must be strictly clipped to [-1.0, 1.0]
+    expected_clipped = torch.tensor([1.0, -1.0, 1.0, -1.0] + [0.0] * 12, dtype=torch.float32)
+    np.testing.assert_allclose(next_td["prev_action"].numpy(), expected_clipped.numpy(), atol=1e-6)
+    np.testing.assert_allclose(env.prev_action, expected_clipped.numpy(), atol=1e-6)
+
+
+def test_leap_cube_env_configurable_drop_z_threshold():
+    """Verify drop_z_threshold is configurable and respected during step."""
+    custom_threshold = 0.08
+    env = LeapCubeReorientEnv(
+        max_steps=50,
+        drop_z_threshold=custom_threshold,
+        domain_randomization=False,
+        seed=42,
+    )
+    assert env.drop_z_threshold == custom_threshold
+
+    td = env.reset()
+    # Align achieved goal with desired goal
+    env.data.qpos[19:23] = env.desired_goal.cpu().numpy()
+
+    # Case 1: Cube z is 0.06 (above default 0.04, but below custom 0.08) -> dropped (-1.0)
+    env.data.qpos[18] = 0.06
+    td["action"] = torch.zeros(16)
+    step_out = env.step(td)
+    assert step_out["next", "reward"].item() == -1.0
+
+    # Case 2: Cube z is 0.10 (above custom 0.08) and orientation matches -> success (0.0)
+    next_td = step_out["next"]
+    env.data.qpos[19:23] = env.desired_goal.cpu().numpy()
+    env.data.qpos[18] = 0.10
+    next_td["action"] = torch.zeros(16)
+    step_out_2 = env.step(next_td)
+    assert step_out_2["next", "reward"].item() == 0.0
+

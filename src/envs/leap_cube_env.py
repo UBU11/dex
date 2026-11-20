@@ -42,6 +42,7 @@ class LeapCubeReorientEnv(EnvBase):
         n_substeps: int = 10,
         max_delta: float = 0.15,
         angle_tol: float = 0.15,
+        drop_z_threshold: float = 0.04,
         consecutive_steps_for_success: int = 5,
         xy_offset_range: float = 0.015,
         domain_randomization: bool = True,
@@ -54,6 +55,7 @@ class LeapCubeReorientEnv(EnvBase):
         self.n_substeps = n_substeps
         self.max_delta = max_delta
         self.angle_tol = angle_tol
+        self.drop_z_threshold = drop_z_threshold
         self.consecutive_steps_for_success = consecutive_steps_for_success
         self.xy_offset_range = xy_offset_range
         self.domain_randomization = domain_randomization
@@ -206,7 +208,7 @@ class LeapCubeReorientEnv(EnvBase):
         qvel_hand = self.data.qvel[:16].astype(np.float32)
         cube_p = self.data.qpos[16:19].astype(np.float32)
         cube_q = self.data.qpos[19:23].astype(np.float32)
-        current_act = action.detach().float().cpu().numpy().reshape(-1)
+        current_act = np.clip(action_np, -1.0, 1.0).astype(np.float32)
         self.prev_action = current_act
 
         raw_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, current_act])
@@ -221,7 +223,7 @@ class LeapCubeReorientEnv(EnvBase):
             self.desired_goal,
             cube_z,
             angle_tol=self.angle_tol,
-            drop_z_threshold=0.04,
+            drop_z_threshold=self.drop_z_threshold,
         )
 
         # ponytail: consecutive goal chaining without resetting hand or cube

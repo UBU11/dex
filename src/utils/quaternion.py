@@ -39,7 +39,11 @@ def compute_sparse_her_reward(
     not_dropped = z > drop_z_threshold
     is_success = (ang_err < angle_tol) & not_dropped
     # ponytail: sparse reward: 0.0 on goal achievement, -1.0 everywhere else
-    reward = torch.where(is_success, 0.0, -1.0)
+    reward = torch.where(
+        is_success,
+        torch.zeros_like(ang_err),
+        torch.full_like(ang_err, -1.0),
+    )
     return reward, is_success
 
 

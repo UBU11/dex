@@ -164,6 +164,7 @@ def test_compute_sparse_her_reward_batched():
     )
 
     assert rewards.shape == (4, 1)
+    assert rewards.dtype == q_achieved.dtype
     assert successes.shape == (4, 1)
     assert torch.equal(rewards, torch.tensor([[0.0], [-1.0], [-1.0], [-1.0]]))
     assert torch.equal(successes, torch.tensor([[True], [False], [False], [False]]))
