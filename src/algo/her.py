@@ -8,6 +8,12 @@ class VectorizedFutureHER:
     """
     Implements the 'future' HER strategy (default relabel_prob=0.8)
     on episodic TensorDict batches collected with replay_write_mode='trajectory'.
+
+    Note on shapes:
+        Accepts an episodic trajectory TensorDict batch of shape [B, T].
+        Yields a sampled transition TensorDict batch of shape [B], where each
+        transition sampled at time t_idx is potentially relabeled with an achieved
+        goal from a future time step future_idx in [t_idx, T - 1].
     """
 
     def __init__(
@@ -45,9 +51,10 @@ class VectorizedFutureHER:
         # ponytail: sample random time indices t in [0, T - 2]
         t_idx = torch.randint(0, T - 1, (B,), device=device)
 
-        # ponytail: sample future offsets in [t_idx, T - 1]
+        # ponytail: correct span to include T - 1: (T - 1 - t_idx) + 1 = T - t_idx
         rand_floats = torch.rand(B, device=device)
-        future_idx = t_idx + (rand_floats * (T - 1 - t_idx)).long()
+        offset = (rand_floats * (T - t_idx)).long()
+        future_idx = torch.clamp(t_idx + offset, max=T - 1)
 
         # ponytail: extract transition at t_idx via advanced indexing
         batch_arange = torch.arange(B, device=device)

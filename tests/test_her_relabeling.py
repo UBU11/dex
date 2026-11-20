@@ -66,18 +66,21 @@ def make_dummy_episodes(
 
 def test_her_relabel_probability_one_sets_reward_zero():
     """
-    When relabel_prob=1.0 and T=2, t_idx=0 and future_idx=0.
-    The new desired goal equals the next achieved goal at step 0.
+    When relabel_prob=1.0 and achieved orientation is reached (e.g. constant across time),
+    the new desired goal equals the next achieved goal of the transition.
     With cube_z > 0.04 (not dropped), recomputed reward at next step must equal 0.0.
     """
     torch.manual_seed(42)
-    B, T = 32, 2
+    B, T = 32, 4
     episodes = make_dummy_episodes(batch_size=B, time_steps=T, cube_z_val=0.05)
+    # Set identical achieved orientation across all time steps within each episode
+    const_achieved = episodes["next", "achieved_goal"][:, :1, :].expand(B, T, 4).clone()
+    episodes["next", "achieved_goal"] = const_achieved
 
     her = VectorizedFutureHER(relabel_prob=1.0)
     transition = her(episodes)
 
-    # All transitions should be relabeled
+    # All transitions should be relabeled with the achieved goal
     next_achieved = transition["next", "achieved_goal"]
     new_desired = transition["desired_goal"]
     next_desired = transition["next", "desired_goal"]
@@ -96,8 +99,11 @@ def test_her_dropped_cube_recomputes_penalty_even_if_reoriented():
     even if the desired goal matches the achieved goal.
     """
     torch.manual_seed(42)
-    B, T = 16, 2
+    B, T = 16, 4
     episodes = make_dummy_episodes(batch_size=B, time_steps=T, cube_z_val=0.02)
+    # Set identical achieved orientation across all time steps within each episode
+    const_achieved = episodes["next", "achieved_goal"][:, :1, :].expand(B, T, 4).clone()
+    episodes["next", "achieved_goal"] = const_achieved
 
     her = VectorizedFutureHER(relabel_prob=1.0)
     transition = her(episodes)
@@ -179,25 +185,109 @@ def test_her_output_shape_batch_size_and_keys():
 def test_her_statistical_relabel_rate():
     """
     On a large batch (B=1000), approximately 80% of transitions should be relabeled.
+    Transitions with relabel_mask have desired_goal replaced with a future orientation
+    different from original desired_goal.
     """
     torch.manual_seed(999)
-    B, T = 1000, 2
-    # Create episodes with distinct known values for original vs future
+    B, T = 1000, 4
     episodes = make_dummy_episodes(batch_size=B, time_steps=T)
+
+    # Initialize original desired goals to a fixed distinct quaternion [1, 0, 0, 0]
+    orig_goal = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(B, T, 4).clone()
+    episodes["desired_goal"] = orig_goal
+    episodes["next", "desired_goal"] = orig_goal.clone()
+
+    # Initialize achieved goals to orthogonal quaternion [0, 1, 0, 0]
+    future_achieved = torch.tensor([0.0, 1.0, 0.0, 0.0]).expand(B, T, 4).clone()
+    episodes["next", "achieved_goal"] = future_achieved
 
     her = VectorizedFutureHER(relabel_prob=0.8)
     transition = her(episodes)
 
-    # For T=2, future achieved goal is at index 0.
-    # Check which transitions were relabeled to match next achieved_goal
-    next_achieved = transition["next", "achieved_goal"]
+    # Relabeled transitions have desired_goal replaced with future orientation [0, 1, 0, 0]
     is_relabeled = torch.all(
-        torch.isclose(transition["desired_goal"], next_achieved, atol=1e-5), dim=-1
+        torch.isclose(transition["desired_goal"], torch.tensor([0.0, 1.0, 0.0, 0.0]), atol=1e-5), dim=-1
     )
-    relabel_frac = is_relabeled.float().mean().item()
+    # Non-relabeled transitions retain original desired_goal [1, 0, 0, 0]
+    is_original = torch.all(
+        torch.isclose(transition["desired_goal"], torch.tensor([1.0, 0.0, 0.0, 0.0]), atol=1e-5), dim=-1
+    )
 
+    # Every transition is either relabeled with future achieved goal or keeps original goal
+    assert torch.all(is_relabeled | is_original)
+    assert not torch.any(is_relabeled & is_original)
+
+    relabel_frac = is_relabeled.float().mean().item()
     # With B=1000, 0.8 relabeling prob should fall reliably in [0.75, 0.85]
     assert 0.75 <= relabel_frac <= 0.85, f"Observed relabel fraction: {relabel_frac}"
+
+
+def test_her_future_idx_samples_terminal_step():
+    """
+    Verify that future_idx == T - 1 is actively sampled and reachable
+    when sampling from episodic trajectory batch.
+    """
+    torch.manual_seed(42)
+    B, T = 2000, 5
+    episodes = make_dummy_episodes(batch_size=B, time_steps=T)
+
+    # Set all steps 0..T-2 achieved goal to [1, 0, 0, 0]
+    episodes["next", "achieved_goal"] = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(B, T, 4).clone()
+    # Set terminal step T-1 achieved goal to distinct marker quaternion [0, 0, 0, 1]
+    terminal_marker = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    episodes["next", "achieved_goal"][:, T - 1] = terminal_marker
+
+    her = VectorizedFutureHER(relabel_prob=1.0)
+    transition = her(episodes)
+
+    # Transitions where future_idx == T - 1 will have desired_goal == terminal_marker
+    is_terminal = torch.all(
+        torch.isclose(transition["desired_goal"], terminal_marker, atol=1e-5), dim=-1
+    )
+    terminal_count = is_terminal.sum().item()
+
+    # Terminal step must be sampled across the batch
+    assert terminal_count > 0, "Terminal step T-1 was never sampled as future_idx"
+    terminal_frac = terminal_count / B
+    assert terminal_frac > 0.10, f"Terminal step fraction too low: {terminal_frac}"
+
+
+def test_her_future_idx_greater_than_t_idx_unreached_reward():
+    """
+    Verify that when future_idx > t_idx, an orientation achieved at a future time step
+    is not yet reached at t_idx and correctly yields reward -1.0 until reached.
+    """
+    torch.manual_seed(2026)
+    B, T = 1000, 4
+    episodes = make_dummy_episodes(batch_size=B, time_steps=T, cube_z_val=0.05)
+
+    # 4 mutually orthogonal unit quaternions along time axis
+    quats = torch.tensor([
+        [1.0, 0.0, 0.0, 0.0],  # step 0
+        [0.0, 1.0, 0.0, 0.0],  # step 1
+        [0.0, 0.0, 1.0, 0.0],  # step 2
+        [0.0, 0.0, 0.0, 1.0],  # step 3
+    ])
+    episodes["next", "achieved_goal"] = quats.unsqueeze(0).expand(B, T, 4).clone()
+
+    her = VectorizedFutureHER(relabel_prob=1.0)
+    transition = her(episodes)
+
+    next_achieved = transition["next", "achieved_goal"]
+    new_desired = transition["desired_goal"]
+    rewards = transition["next", "reward"]
+
+    # When future_idx == t_idx, new_desired == next_achieved -> reward must be 0.0
+    same_step_mask = torch.all(torch.isclose(new_desired, next_achieved, atol=1e-5), dim=-1)
+    # When future_idx > t_idx, new_desired != next_achieved -> reward must be -1.0
+    future_step_mask = ~same_step_mask
+
+    assert same_step_mask.sum().item() > 0, "No same-step transitions sampled"
+    assert future_step_mask.sum().item() > 0, "No strictly future transitions sampled"
+
+    # Verify rewards
+    assert torch.all(rewards[same_step_mask] == 0.0)
+    assert torch.all(rewards[future_step_mask] == -1.0)
 
 
 def test_her_does_not_mutate_original_episode_batch():
