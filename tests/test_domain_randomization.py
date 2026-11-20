@@ -134,6 +134,18 @@ def test_adr_curriculum_controller_progression(mj_model_data):
     controller.update(0.90)
     assert controller.difficulty == 1.0
 
+    # Damped rollback when success_rate < start_threshold * 0.5
+    controller.set_difficulty(0.10)
+    new_diff = controller.update(0.20)
+    assert math.isclose(new_diff, 0.075, abs_tol=1e-6)
+    assert math.isclose(controller.difficulty, 0.075, abs_tol=1e-6)
+
+    # Rollback clamps at 0.0
+    controller.set_difficulty(0.01)
+    new_diff = controller.update(0.10)
+    assert new_diff == 0.0
+    assert controller.difficulty == 0.0
+
     # Bounds clamping in set_difficulty
     controller.set_difficulty(-0.5)
     assert controller.difficulty == 0.0

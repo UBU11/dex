@@ -182,3 +182,23 @@ def test_sac_trainer_optimization_with_domain_randomization():
     for k, v in metrics.items():
         assert math.isfinite(v), f"Metric {k} is non-finite: {v}"
     assert math.isfinite(pos_ratio)
+
+
+def test_env_enable_domain_randomization_property_setter():
+    """Verify enable_domain_randomization property setter dynamically toggles randomizer and curriculum."""
+    env = LeapCubeReorientEnv(enable_domain_randomization=False, seed=42)
+    assert not env.enable_domain_randomization
+    assert env.randomizer is None
+    assert env.curriculum_controller is None
+
+    # Dynamically enable
+    env.enable_domain_randomization = True
+    assert env.enable_domain_randomization
+    assert isinstance(env.randomizer, DomainRandomizer)
+    assert isinstance(env.curriculum_controller, ADRCurriculumController)
+    assert env.curriculum_controller.randomizer is env.randomizer
+
+    # Dynamically disable
+    env.enable_domain_randomization = False
+    assert not env.enable_domain_randomization
+    assert env.randomizer is not None

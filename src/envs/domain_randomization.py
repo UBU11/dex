@@ -147,7 +147,11 @@ class DomainRandomizer:
 
 
 class ADRCurriculumController:
-    """Automatic Domain Randomization (ADR) curriculum controller."""
+    """Automatic Domain Randomization (ADR) curriculum controller.
+
+    Ramps randomization difficulty from 0.0 to 1.0 as evaluation success rate
+    meets or exceeds `start_threshold`, targeting benchmark success at `target_threshold`.
+    """
 
     def __init__(
         self,
@@ -157,6 +161,15 @@ class ADRCurriculumController:
         step_size: float = 0.05,
         initial_difficulty: float = 0.0,
     ) -> None:
+        """Initializes ADR controller.
+
+        Args:
+            randomizer: DomainRandomizer instance to modulate.
+            start_threshold: Minimum success rate to trigger difficulty progression.
+            target_threshold: Upper benchmark success rate goal targeted at difficulty 1.0.
+            step_size: Step increment for difficulty adjustments.
+            initial_difficulty: Initial difficulty in [0.0, 1.0].
+        """
         self.randomizer = randomizer
         self.start_threshold = start_threshold
         self.target_threshold = target_threshold
@@ -173,6 +186,11 @@ class ADRCurriculumController:
         self.randomizer.set_difficulty(self._difficulty)
 
     def update(self, success_rate: float) -> float:
+        """Updates ADR difficulty based on evaluation success rate."""
         if success_rate >= self.start_threshold:
-            self.set_difficulty(self._difficulty + self.step_size)
+            new_diff = min(1.0, self.difficulty + self.step_size)
+            self.set_difficulty(new_diff)
+        elif success_rate < self.start_threshold * 0.5:
+            new_diff = max(0.0, self.difficulty - self.step_size * 0.5)
+            self.set_difficulty(new_diff)
         return self._difficulty

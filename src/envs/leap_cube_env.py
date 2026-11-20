@@ -78,12 +78,6 @@ class LeapCubeReorientEnv(EnvBase):
         self.reward_mode = reward_mode
         self.action_penalty_weight = action_penalty_weight
 
-        if domain_randomization is not None:
-            enable_domain_randomization = domain_randomization
-
-        self.enable_domain_randomization = enable_domain_randomization
-        self.domain_randomization = enable_domain_randomization
-
         # ponytail: compile MjSpec on demand if raw model is not supplied
         if model is None:
             if spec is None:
@@ -101,18 +95,13 @@ class LeapCubeReorientEnv(EnvBase):
         # Low-level PD controller
         self.pd_controller = PDController(self.model)
 
-        if self.enable_domain_randomization:
-            if randomizer is None:
-                randomizer = DomainRandomizer(self.model, self.data)
-            self.randomizer: DomainRandomizer | None = randomizer
-            self.curriculum_controller: ADRCurriculumController | None = (
-                ADRCurriculumController(self.randomizer)
-            )
-        else:
-            self.randomizer = None
-            self.curriculum_controller = None
+        self._enable_domain_randomization = False
+        self.randomizer: DomainRandomizer | None = randomizer
+        self.curriculum_controller: ADRCurriculumController | None = None
 
-        self.domain_randomizer = self.randomizer
+        if domain_randomization is not None:
+            enable_domain_randomization = domain_randomization
+        self.enable_domain_randomization = enable_domain_randomization
 
         # Episode state variables
         self.current_step = 0
@@ -123,6 +112,31 @@ class LeapCubeReorientEnv(EnvBase):
 
         self._set_seed(seed)
         self._make_specs()
+
+    @property
+    def enable_domain_randomization(self) -> bool:
+        return self._enable_domain_randomization
+
+    @enable_domain_randomization.setter
+    def enable_domain_randomization(self, value: bool) -> None:
+        self._enable_domain_randomization = bool(value)
+        if self._enable_domain_randomization:
+            if self.randomizer is None:
+                self.randomizer = DomainRandomizer(self.model, self.data)
+            if self.curriculum_controller is None:
+                self.curriculum_controller = ADRCurriculumController(self.randomizer)
+
+    @property
+    def domain_randomization(self) -> bool:
+        return self.enable_domain_randomization
+
+    @domain_randomization.setter
+    def domain_randomization(self, value: bool) -> None:
+        self.enable_domain_randomization = value
+
+    @property
+    def domain_randomizer(self) -> DomainRandomizer | None:
+        return self.randomizer
 
     def _make_specs(self) -> None:
         """Configures TorchRL action, observation, reward, and done specs."""
@@ -215,17 +229,12 @@ class LeapCubeReorientEnv(EnvBase):
         # Sample initial target quaternion based on target_mode
         self.desired_goal = self._sample_goal()
 
-        # Initial raw observation vector
-        qpos_hand = self.data.qpos[:16].astype(np.float32)
-        qvel_hand = self.data.qvel[:16].astype(np.float32)
-        cube_p = self.data.qpos[16:19].astype(np.float32)
-        cube_q = self.data.qpos[19:23].astype(np.float32)
-        initial_obs = np.concatenate([qpos_hand, qvel_hand, cube_p, cube_q, self.prev_action])
-
         if self.enable_domain_randomization and self.randomizer is not None:
-            self.randomizer.reset_latency(initial_obs)
+            self.randomizer.reset_latency()
 
         obs = self._get_obs()
+        cube_p = self.data.qpos[16:19].astype(np.float32)
+        cube_q = self.data.qpos[19:23].astype(np.float32)
 
         return TensorDict(
             {
