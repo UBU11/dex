@@ -5,7 +5,7 @@ from src.algo.actor import (
     stable_tanh_jacobian_correction,
 )
 from src.algo.critic import TwinContinuousQCritic
-from src.algo.her import VectorizedFutureHER
+from src.algo.her import VectorizedFutureHER, create_her_replay_buffer
 from src.algo.sac_trainer import SACLoss, SACTrainer
 
 __all__ = [
@@ -16,5 +16,6 @@ __all__ = [
     "SquashedGaussianSACActor",
     "TwinContinuousQCritic",
     "VectorizedFutureHER",
+    "create_her_replay_buffer",
     "stable_tanh_jacobian_correction",
 ]

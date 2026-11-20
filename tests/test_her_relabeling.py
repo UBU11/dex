@@ -8,14 +8,20 @@ from tensordict import TensorDict
 # Ensure repository root is on sys.path for direct pytest invocation
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.algo import VectorizedFutureHER as VectorizedFutureHERFromPackage
-from src.algo.her import VectorizedFutureHER
+from src.algo import (
+    VectorizedFutureHER as VectorizedFutureHERFromPackage,
+)
+from src.algo import (
+    create_her_replay_buffer as create_her_replay_buffer_from_package,
+)
+from src.algo.her import VectorizedFutureHER, create_her_replay_buffer
 from src.utils.quaternion import sample_uniform_quat
 
 
 def test_her_exposed_in_algo_package():
-    """Verify VectorizedFutureHER is exposed in src.algo package namespace."""
+    """Verify VectorizedFutureHER and create_her_replay_buffer are exposed in src.algo package namespace."""
     assert VectorizedFutureHERFromPackage is VectorizedFutureHER
+    assert create_her_replay_buffer_from_package is create_her_replay_buffer
 
 
 def make_dummy_episodes(
@@ -324,3 +330,167 @@ def test_her_invalid_time_dimension():
     episodes_1d = TensorDict({"desired_goal": torch.randn(4, 4)}, batch_size=[4])
     with pytest.raises(ValueError, match="2D episodic"):
         her(episodes_1d)
+
+
+def test_her_with_slice_len_processes_1d_batch():
+    """Verify VectorizedFutureHER with slice_len processes 1D TensorDicts of shape [B * slice_len]."""
+    torch.manual_seed(42)
+    B, T = 4, 6
+    episodes_2d = make_dummy_episodes(batch_size=B, time_steps=T)
+    batch_1d = episodes_2d.reshape(B * T)
+    her = VectorizedFutureHER(relabel_prob=0.8, slice_len=T)
+    relabeled = her(batch_1d)
+    assert relabeled.shape == torch.Size([B * T])
+    assert relabeled["next"].shape == torch.Size([B * T])
+    assert "desired_goal" in relabeled
+    assert "next" in relabeled
+    assert "desired_goal" in relabeled["next"]
+    assert "reward" in relabeled["next"]
+    assert torch.allclose(relabeled["desired_goal"], relabeled["next", "desired_goal"])
+
+
+def test_her_as_transform_factory():
+    """Verify VectorizedFutureHER.as_transform returns a callable transform with slice_len."""
+    torch.manual_seed(42)
+    B, T = 4, 6
+    episodes_2d = make_dummy_episodes(batch_size=B, time_steps=T)
+    batch_1d = episodes_2d.reshape(B * T)
+    her = VectorizedFutureHER(relabel_prob=0.8)
+    transform = her.as_transform(slice_len=T)
+    relabeled = transform(batch_1d)
+    assert relabeled.shape == torch.Size([B * T])
+    assert torch.allclose(relabeled["desired_goal"], relabeled["next", "desired_goal"])
+
+
+def test_her_slice_len_invalid_shape_or_length():
+    """Verify ValueError is raised on incompatible shapes with slice_len."""
+    her = VectorizedFutureHER(slice_len=4)
+    # 1D batch not divisible by slice_len
+    td_odd = TensorDict({"desired_goal": torch.randn(10, 4)}, batch_size=[10])
+    with pytest.raises(ValueError, match="divisible"):
+        her(td_odd)
+
+    # 2D batch where T != slice_len
+    td_2d_mismatch = TensorDict(
+        {"desired_goal": torch.randn(2, 5, 4)}, batch_size=[2, 5]
+    )
+    with pytest.raises(ValueError, match="mismatch|slice_len"):
+        her(td_2d_mismatch)
+
+    # slice_len < 2
+    with pytest.raises(ValueError, match=">= 2"):
+        VectorizedFutureHER(slice_len=1)
+
+
+def test_create_her_replay_buffer_structure():
+    """Verify create_her_replay_buffer creates a TensorDictReplayBuffer with SliceSampler and HER."""
+    from torchrl.data import SliceSampler, TensorDictReplayBuffer
+
+    rb = create_her_replay_buffer(
+        storage_size=500,
+        slice_len=4,
+        relabel_prob=0.8,
+        batch_size=16,
+    )
+    assert isinstance(rb, TensorDictReplayBuffer)
+    assert isinstance(rb._sampler, SliceSampler)
+    assert rb._sampler.slice_len == 4
+    assert rb._batch_size == 16
+    assert rb._storage.max_size == 500
+
+
+def test_her_replay_buffer_sampling_and_relabeling():
+    """Verify sampling from create_her_replay_buffer returns relabeled transitions matching batch size."""
+    torch.manual_seed(123)
+    slice_len = 4
+    batch_size = 16
+    rb = create_her_replay_buffer(
+        storage_size=1000,
+        slice_len=slice_len,
+        relabel_prob=0.8,
+        batch_size=batch_size,
+    )
+    num_trajs = 5
+    traj_len = 10
+    total_steps = num_trajs * traj_len
+    q_achieved = sample_uniform_quat(total_steps)
+    q_desired = sample_uniform_quat(total_steps)
+
+    trajs = TensorDict(
+        {
+            "obs": torch.randn(total_steps, 16),
+            "desired_goal": q_desired,
+            "action": torch.randn(total_steps, 16),
+            "collector": TensorDict(
+                {"traj_ids": torch.repeat_interleave(torch.arange(num_trajs), traj_len)},
+                batch_size=[total_steps],
+            ),
+            "next": TensorDict(
+                {
+                    "obs": torch.randn(total_steps, 16),
+                    "achieved_goal": q_achieved,
+                    "desired_goal": q_desired,
+                    "cube_z": torch.full((total_steps, 1), 0.05),
+                    "reward": torch.full((total_steps, 1), -1.0),
+                    "done": torch.zeros((total_steps, 1), dtype=torch.bool),
+                },
+                batch_size=[total_steps],
+            ),
+        },
+        batch_size=[total_steps],
+    )
+    rb.extend(trajs)
+
+    sample = rb.sample()
+    assert sample.batch_size == torch.Size([batch_size])
+    assert "obs" in sample
+    assert "desired_goal" in sample
+    assert "next" in sample
+    assert "achieved_goal" in sample["next"]
+    assert "desired_goal" in sample["next"]
+    assert "reward" in sample["next"]
+    assert torch.allclose(sample["desired_goal"], sample["next", "desired_goal"])
+    assert torch.all((sample["next", "reward"] == 0.0) | (sample["next", "reward"] == -1.0))
+
+
+def test_her_replay_buffer_relabel_probability_one_reward_zero():
+    """Verify when relabel_prob=1.0 and cube_z not dropped, reward is 0.0."""
+    torch.manual_seed(42)
+    slice_len = 4
+    batch_size = 8
+    rb = create_her_replay_buffer(
+        storage_size=200,
+        slice_len=slice_len,
+        relabel_prob=1.0,
+        batch_size=batch_size,
+    )
+    steps = 20
+    fixed_quat = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(steps, 4).clone()
+    trajs = TensorDict(
+        {
+            "obs": torch.randn(steps, 8),
+            "desired_goal": sample_uniform_quat(steps),
+            "action": torch.randn(steps, 16),
+            "collector": TensorDict(
+                {"traj_ids": torch.repeat_interleave(torch.arange(2), 10)},
+                batch_size=[steps],
+            ),
+            "next": TensorDict(
+                {
+                    "obs": torch.randn(steps, 8),
+                    "achieved_goal": fixed_quat,
+                    "desired_goal": sample_uniform_quat(steps),
+                    "cube_z": torch.full((steps, 1), 0.05),
+                    "reward": torch.full((steps, 1), -1.0),
+                    "done": torch.zeros((steps, 1), dtype=torch.bool),
+                },
+                batch_size=[steps],
+            ),
+        },
+        batch_size=[steps],
+    )
+    rb.extend(trajs)
+    sample = rb.sample()
+    expected_quat = torch.tensor([1.0, 0.0, 0.0, 0.0]).expand(batch_size, 4)
+    assert torch.allclose(sample["desired_goal"], expected_quat, atol=1e-5)
+    assert torch.allclose(sample["next", "reward"], torch.zeros((batch_size, 1)))
