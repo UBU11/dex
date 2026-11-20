@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.envs import (
     DEFAULT_CUBE_POS,
+    DEFAULT_CUBE_QUAT,
     DomainRandomizer,
     LeapCubeReorientEnv,
     build_leap_cube_spec,
@@ -302,6 +303,7 @@ def test_leap_cube_env_configurable_drop_z_threshold():
     env = LeapCubeReorientEnv(
         max_steps=50,
         drop_z_threshold=custom_threshold,
+        randomize_initial_orientation=False,
         domain_randomization=False,
         seed=42,
     )
@@ -372,5 +374,43 @@ def test_leap_cube_env_invalid_target_and_reward_modes():
 
     with pytest.raises(ValueError, match="reward_mode"):
         LeapCubeReorientEnv(reward_mode="invalid")
+
+
+def test_reset_orientation_distribution():
+    """Verify reset randomizes cube initial orientation on S^3 (or yaw) and respects flags."""
+    env_default = LeapCubeReorientEnv(max_steps=50, seed=42)
+    assert env_default.randomize_initial_orientation is True
+    assert env_default.xy_offset_range == 0.015
+
+    orientations = []
+    for _ in range(20):
+        td = env_default.reset()
+        quat = env_default.data.qpos[19:23].copy()
+        pos = env_default.data.qpos[16:19].copy()
+        orientations.append(quat)
+
+        assert math.isclose(np.linalg.norm(quat), 1.0, rel_tol=1e-5)
+        assert abs(pos[0] - DEFAULT_CUBE_POS[0]) <= env_default.xy_offset_range + 1e-6
+        assert abs(pos[1] - DEFAULT_CUBE_POS[1]) <= env_default.xy_offset_range + 1e-6
+        np.testing.assert_allclose(td["achieved_goal"].cpu().numpy(), quat, atol=1e-5)
+
+    quat_arr = np.array(orientations)
+    assert np.var(quat_arr) > 1e-4
+
+    env_fixed = LeapCubeReorientEnv(randomize_initial_orientation=False, seed=42)
+    assert env_fixed.randomize_initial_orientation is False
+    for _ in range(5):
+        td = env_fixed.reset()
+        np.testing.assert_allclose(env_fixed.data.qpos[19:23], DEFAULT_CUBE_QUAT, atol=1e-6)
+        np.testing.assert_allclose(td["achieved_goal"].cpu().numpy(), DEFAULT_CUBE_QUAT, atol=1e-6)
+
+    env_yaw = LeapCubeReorientEnv(target_mode="yaw", randomize_initial_orientation=True, seed=42)
+    for _ in range(10):
+        td = env_yaw.reset()
+        quat = env_yaw.data.qpos[19:23]
+        assert abs(quat[1]) < 1e-6
+        assert abs(quat[2]) < 1e-6
+        assert math.isclose(np.linalg.norm(quat), 1.0, rel_tol=1e-5)
+
 
 

@@ -51,6 +51,7 @@ class LeapCubeReorientEnv(EnvBase):
         drop_z_threshold: float = 0.04,
         consecutive_steps_for_success: int = 5,
         xy_offset_range: float = 0.015,
+        randomize_initial_orientation: bool = True,
         target_mode: str = "so3",
         reward_mode: str = "sparse",
         action_penalty_weight: float = 0.01,
@@ -74,6 +75,7 @@ class LeapCubeReorientEnv(EnvBase):
         self.drop_z_threshold = drop_z_threshold
         self.consecutive_steps_for_success = consecutive_steps_for_success
         self.xy_offset_range = xy_offset_range
+        self.randomize_initial_orientation = randomize_initial_orientation
         self.target_mode = target_mode
         self.reward_mode = reward_mode
         self.action_penalty_weight = action_penalty_weight
@@ -207,14 +209,22 @@ class LeapCubeReorientEnv(EnvBase):
         self.data.qpos[:16] = DEFAULT_HAND_QPOS
         self.data.ctrl[:16] = DEFAULT_HAND_QPOS
 
-        # ponytail: randomize cube XY position by +- 1.5 cm to avoid distribution shift
+        # Randomize cube XY position to prevent initial-state distribution shift
         dx = float(self.np_rng.uniform(-self.xy_offset_range, self.xy_offset_range))
         dy = float(self.np_rng.uniform(-self.xy_offset_range, self.xy_offset_range))
         initial_cube_pos = DEFAULT_CUBE_POS.copy()
         initial_cube_pos[0] += dx
         initial_cube_pos[1] += dy
         self.data.qpos[16:19] = initial_cube_pos
-        self.data.qpos[19:23] = DEFAULT_CUBE_QUAT
+
+        if self.randomize_initial_orientation:
+            if self.target_mode == "yaw":
+                quat = sample_yaw_quat(1, device=self.device)[0].detach().cpu().numpy()
+            else:
+                quat = sample_uniform_quat(1, device=self.device)[0].detach().cpu().numpy()
+            self.data.qpos[19:23] = quat
+        else:
+            self.data.qpos[19:23] = DEFAULT_CUBE_QUAT
 
         # Zero out velocities
         self.data.qvel[:] = 0.0
