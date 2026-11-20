@@ -78,7 +78,8 @@ class SquashedGaussianSACActor(nn.Module):
             eps = torch.randn_like(mu)
             u = mu + std * eps
 
-        action = torch.tanh(u)
+        # ponytail: clamp tanh to strictly open interval (-1, 1) preventing FP32 saturation
+        action = torch.clamp(torch.tanh(u), -1.0 + 1e-7, 1.0 - 1e-7)
 
         # Unsquashed Gaussian log-prob
         log_prob_u = -0.5 * (
