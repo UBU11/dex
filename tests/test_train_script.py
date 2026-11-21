@@ -426,13 +426,15 @@ def test_train_no_early_stop_when_disabled(tmp_path, monkeypatch):
 
 def test_update_collector_target_mode_single_env():
     """Verify update_collector_target_mode updates target_mode on single LeapCubeReorientEnv collector."""
+    from functools import partial
+
     from src.algo import update_collector_target_mode
     from src.algo.actor import SquashedGaussianSACActor
     from src.algo.collector import PolicyModule, create_trajectory_collector
     from src.algo.her import create_her_replay_buffer
     from src.envs import LeapCubeReorientEnv
 
-    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    env_fn = partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3")
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
     policy = PolicyModule(actor)
     rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
@@ -519,6 +521,8 @@ def test_update_collector_target_mode_parallel_env():
 
 def test_create_trajectory_collector_multi_worker_parallel():
     """Verify create_trajectory_collector supports num_workers > 1 with ParallelEnv."""
+    from functools import partial
+
     from torchrl.envs.batched_envs import ParallelEnv
 
     from src.algo import update_collector_target_mode
@@ -527,7 +531,7 @@ def test_create_trajectory_collector_multi_worker_parallel():
     from src.algo.her import create_her_replay_buffer
     from src.envs import LeapCubeReorientEnv
 
-    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    env_fn = partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3")
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
     policy = PolicyModule(actor)
     rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
@@ -559,6 +563,8 @@ def test_create_trajectory_collector_multi_worker_parallel():
 
 def test_create_trajectory_collector_multi_worker_with_domain_randomization():
     """Verify multi-worker collector properly wraps domain randomization on workers."""
+    from functools import partial
+
     from torchrl.envs.batched_envs import ParallelEnv
 
     from src.algo.actor import SquashedGaussianSACActor
@@ -566,7 +572,7 @@ def test_create_trajectory_collector_multi_worker_with_domain_randomization():
     from src.algo.her import create_her_replay_buffer
     from src.envs import LeapCubeReorientEnv
 
-    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    env_fn = partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3")
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
     policy = PolicyModule(actor)
     rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
@@ -591,12 +597,14 @@ def test_create_trajectory_collector_multi_worker_with_domain_randomization():
 
 def test_create_trajectory_collector_invalid_num_workers():
     """Verify create_trajectory_collector raises ValueError for invalid num_workers."""
+    from functools import partial
+
     from src.algo.actor import SquashedGaussianSACActor
     from src.algo.collector import PolicyModule, create_trajectory_collector
     from src.algo.her import create_her_replay_buffer
     from src.envs import LeapCubeReorientEnv
 
-    env_fn = lambda: LeapCubeReorientEnv(max_steps=10)
+    env_fn = partial(LeapCubeReorientEnv, max_steps=10)
     actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
     policy = PolicyModule(actor)
     rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
@@ -819,7 +827,7 @@ def test_train_resume_extended_frames(tmp_path, monkeypatch):
             "--seed",
             "42",
             "--total-frames",
-            "10000000",
+            "3000000",
             "--frames-per-batch",
             "30",
             "--storage-size",
@@ -859,6 +867,183 @@ def test_train_resume_extended_frames(tmp_path, monkeypatch):
     assert summary2["total_frames"] == 30
     # start_step was 30, so current_step = start_step + total_frames = 60
     assert summary2["final_step"] == 60
+
+
+def test_train_yaw_warmup_no_premature_early_stop(tmp_path, monkeypatch):
+    """Verify that high success rate during yaw warmup does not trigger premature convergence or early stop."""
+    ckpt_dir = tmp_path / "checkpoints_warmup_early_stop"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "90",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "30",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--warmup-yaw-frames",
+            "60",
+            "--target-mode",
+            "so3",
+            "--early-stop-on-target",
+            "--target-success-rate",
+            "0.85",
+            "--no-enable-adr",
+        ]
+    )
+
+    eval_calls = 0
+
+    def mock_eval(**kwargs):
+        nonlocal eval_calls
+        eval_calls += 1
+        return {
+            "success_rate": 1.0,
+            "mean_consecutive_successes": 10.0,
+            "mean_geodesic_error": 0.01,
+            "mean_return": 150.0,
+        }
+
+    monkeypatch.setattr("train.evaluate_policy", mock_eval)
+
+    summary = train(args)
+
+    # Eval was called at frame 30 (during yaw warmup) and frame 60 (after warmup transition to so3)
+    # At frame 30, warmup was active so early-stop did not trigger!
+    # At frame 60, warmup completed, active_target_mode became "so3", so it converged and early-stopped.
+    assert summary["converged"] is True
+    assert summary["total_frames"] == 60
+    assert summary["final_step"] == 60
+    assert eval_calls == 2
+    assert summary["active_target_mode"] == "so3"
+
+
+def test_train_yaw_warmup_best_success_rate_reset(tmp_path, monkeypatch):
+    """Verify best_success_rate resets to 0.0 upon transitioning from yaw warmup to full SO(3)."""
+    ckpt_dir = tmp_path / "checkpoints_warmup_reset"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "60",
+            "--frames-per-batch",
+            "20",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "20",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "20",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--warmup-yaw-frames",
+            "40",
+            "--target-mode",
+            "so3",
+            "--no-early-stop-on-target",
+            "--no-enable-adr",
+        ]
+    )
+
+    eval_step = 0
+
+    def mock_eval(**kwargs):
+        nonlocal eval_step
+        eval_step += 1
+        if eval_step == 1:
+            # During warmup eval at step 20 (warmup_active=True, yaw mode)
+            return {
+                "success_rate": 0.95,
+                "mean_consecutive_successes": 8.0,
+                "mean_geodesic_error": 0.02,
+                "mean_return": 140.0,
+            }
+        elif eval_step == 2:
+            # Post-warmup SO(3) eval at step 40 (warmup just transitioned to so3)
+            return {
+                "success_rate": 0.70,
+                "mean_consecutive_successes": 3.0,
+                "mean_geodesic_error": 0.12,
+                "mean_return": 70.0,
+            }
+        else:
+            # Post-warmup SO(3) eval at step 60
+            return {
+                "success_rate": 0.75,
+                "mean_consecutive_successes": 4.0,
+                "mean_geodesic_error": 0.10,
+                "mean_return": 80.0,
+            }
+
+    monkeypatch.setattr("train.evaluate_policy", mock_eval)
+
+    summary = train(args)
+
+    # During warmup at step 20, best_success_rate reached 0.95.
+    # At step 40, warmup finished and best_success_rate was reset to 0.0.
+    # At step 40 and 60, success rates 0.70 and 0.75 were recorded.
+    # If not reset, best_success_rate would remain stuck at 0.95.
+    # With reset, the best SO(3) model achieved 0.75.
+    assert summary["total_frames"] == 60
+    assert summary["best_success_rate"] == pytest.approx(0.75)
+
+
+def test_create_trajectory_collector_multi_worker_distinct_seeds():
+    """Verify ParallelEnv workers sample distinct desired goals on reset (no duplicate RNG streams)."""
+    from functools import partial
+
+    from src.algo.actor import SquashedGaussianSACActor
+    from src.algo.collector import PolicyModule, create_trajectory_collector
+    from src.algo.her import create_her_replay_buffer
+    from src.envs import LeapCubeReorientEnv
+
+    env_fn = partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3")
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
+
+    collector = create_trajectory_collector(
+        env_fn=env_fn,
+        policy=policy,
+        replay_buffer=rb,
+        frames_per_batch=20,
+        total_frames=20,
+        num_workers=2,
+        seed=42,
+    )
+    try:
+        penv = collector.env
+        td = penv.reset()
+        g0 = td[0]["desired_goal"]
+        g1 = td[1]["desired_goal"]
+        # Goals must differ across workers
+        assert not torch.allclose(g0, g1), f"Worker goals should be distinct, got {g0} and {g1}"
+    finally:
+        collector.shutdown()
 
 
 

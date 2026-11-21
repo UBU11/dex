@@ -58,18 +58,20 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-    checkpoint_path: str | Path,
+    checkpoint_path: str | Path | dict[str, Any],
     actor: nn.Module,
     critic: nn.Module,
     trainer: SACTrainer | None = None,
     curriculum_controller: ADRCurriculumController | None = None,
     device: torch.device | None = None,
 ) -> dict[str, Any]:
-    path = Path(checkpoint_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {path}")
-
-    checkpoint: dict[str, Any] = torch.load(path, map_location=device, weights_only=False)
+    if isinstance(checkpoint_path, dict):
+        checkpoint = checkpoint_path
+    else:
+        path = Path(checkpoint_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Checkpoint file not found: {path}")
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
 
     actor.load_state_dict(checkpoint["actor_state_dict"])
     critic.load_state_dict(checkpoint["critic_state_dict"])

@@ -79,13 +79,14 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 
     best_success_rate = 0.0
     start_step = 0
+    resume_ckpt: dict[str, Any] | None = None
     if args.resume is not None:
         resume_path = Path(args.resume)
         if not resume_path.is_file():
             raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
-        ckpt_meta = torch.load(resume_path, map_location="cpu", weights_only=False)
-        start_step = ckpt_meta.get("step", 0)
-        best_success_rate = ckpt_meta.get("best_success_rate", 0.0)
+        resume_ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        start_step = resume_ckpt.get("step", 0)
+        best_success_rate = resume_ckpt.get("best_success_rate", 0.0)
 
     warmup_active = args.warmup_yaw_frames > 0 and start_step < args.warmup_yaw_frames
     active_target_mode = "yaw" if warmup_active else args.target_mode
@@ -107,11 +108,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=batch_size,
     )
 
-    def train_env_fn() -> LeapCubeReorientEnv:
+    def train_env_fn(seed: int = args.seed) -> LeapCubeReorientEnv:
         return LeapCubeReorientEnv(
             max_steps=args.max_steps,
             enable_domain_randomization=args.enable_adr,
-            seed=args.seed,
+            seed=seed,
             target_mode=active_target_mode,
         )
 
@@ -123,11 +124,12 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         total_frames=args.total_frames,
         enable_domain_randomization=args.enable_adr,
         num_workers=args.num_workers,
+        seed=args.seed,
     )
 
-    if args.resume is not None:
+    if resume_ckpt is not None:
         meta = load_checkpoint(
-            checkpoint_path=args.resume,
+            checkpoint_path=resume_ckpt,
             actor=actor,
             critic=critic,
             trainer=trainer,
@@ -168,6 +170,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
             if warmup_active and current_step >= args.warmup_yaw_frames:
                 active_target_mode = "so3"
                 warmup_active = False
+                best_success_rate = 0.0
                 update_collector_target_mode(collector, "so3")
                 eval_env.set_target_mode("so3")
                 print(
@@ -260,7 +263,9 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                     else 1.0
                 )
                 if (
-                    last_eval_metrics["success_rate"] >= args.target_success_rate
+                    not warmup_active
+                    and active_target_mode == "so3"
+                    and last_eval_metrics["success_rate"] >= args.target_success_rate
                     and curr_diff >= 1.0 - 1e-6
                 ):
                     converged = True
