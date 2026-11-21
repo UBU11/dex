@@ -32,6 +32,9 @@ def test_parse_args_defaults():
     assert args.target_success_rate == pytest.approx(0.85)
     assert args.device == "cpu"
     assert args.max_steps == 400
+    assert args.num_workers == 1
+    assert args.warmup_yaw_frames == 0
+    assert args.target_mode == "so3"
 
 
 def test_parse_args_overrides():
@@ -66,6 +69,12 @@ def test_parse_args_overrides():
         "cpu",
         "--max-steps",
         "50",
+        "--num-workers",
+        "4",
+        "--warmup-yaw-frames",
+        "20000",
+        "--target-mode",
+        "yaw",
     ]
     args = parse_args(custom_argv)
     assert args.seed == 123
@@ -84,6 +93,9 @@ def test_parse_args_overrides():
     assert args.target_success_rate == pytest.approx(0.9)
     assert args.device == "cpu"
     assert args.max_steps == 50
+    assert args.num_workers == 4
+    assert args.warmup_yaw_frames == 20000
+    assert args.target_mode == "yaw"
 
 
 def test_train_programmatic_short_run(tmp_path):
@@ -597,6 +609,257 @@ def test_create_trajectory_collector_invalid_num_workers():
             frames_per_batch=10,
             num_workers=0,
         )
+
+
+def test_parse_args_invalid_target_mode():
+    """Verify parse_args rejects invalid target modes."""
+    with pytest.raises(SystemExit):
+        parse_args(["--target-mode", "invalid_mode"])
+
+
+def test_train_curriculum_warmup_transition(tmp_path, monkeypatch):
+    """Verify train() dynamically switches from yaw to so3 mode at warmup_yaw_frames."""
+    from src.algo import update_collector_target_mode
+
+    ckpt_dir = tmp_path / "checkpoints_warmup"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "60",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "30",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--warmup-yaw-frames",
+            "30",
+            "--target-mode",
+            "so3",
+        ]
+    )
+
+    mode_updates: list[str] = []
+    orig_update = update_collector_target_mode
+
+    def mock_update(collector, mode):
+        mode_updates.append(mode)
+        return orig_update(collector, mode)
+
+    monkeypatch.setattr("train.update_collector_target_mode", mock_update)
+
+    summary = train(args)
+
+    assert summary["total_frames"] == 60
+    assert mode_updates == ["so3"]
+    assert summary.get("active_target_mode") == "so3"
+
+
+def test_train_curriculum_warmup_resume_past_warmup(tmp_path, monkeypatch):
+    """Verify resuming at a step >= warmup_yaw_frames does not trigger warmup mode switch."""
+    ckpt_dir = tmp_path / "checkpoints_resume_warmup"
+    args1 = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "30",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "200",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+        ]
+    )
+    summary1 = train(args1)
+    resume_ckpt = summary1["saved_checkpoints"][0]
+
+    args2 = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "30",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "200",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--resume",
+            resume_ckpt,
+            "--max-steps",
+            "10",
+            "--warmup-yaw-frames",
+            "20",
+        ]
+    )
+
+    mode_updates: list[str] = []
+    monkeypatch.setattr(
+        "train.update_collector_target_mode",
+        lambda col, mode: mode_updates.append(mode),
+    )
+
+    summary2 = train(args2)
+    assert summary2["total_frames"] == 30
+    assert summary2["final_step"] == 60
+    assert mode_updates == []
+    assert summary2.get("active_target_mode") == "so3"
+
+
+def test_train_multi_worker_execution(tmp_path):
+    """Verify train() runs successfully with multi-worker parallel collection."""
+    ckpt_dir = tmp_path / "checkpoints_multi_worker"
+    args = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "40",
+            "--frames-per-batch",
+            "20",
+            "--storage-size",
+            "500",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "20",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "20",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+            "--num-workers",
+            "2",
+        ]
+    )
+    summary = train(args)
+    assert summary["total_frames"] >= 40
+    assert summary["final_step"] >= 40
+    assert len(summary["saved_checkpoints"]) >= 1
+
+
+def test_train_resume_extended_frames(tmp_path, monkeypatch):
+    """Verify train() properly resumes with large frame budget and updates current_step = start_step + total_frames."""
+    ckpt_dir = tmp_path / "checkpoints_resume_extended"
+    args1 = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "30",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "200",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--max-steps",
+            "10",
+        ]
+    )
+    summary1 = train(args1)
+    resume_ckpt = summary1["saved_checkpoints"][0]
+
+    args2 = parse_args(
+        [
+            "--seed",
+            "42",
+            "--total-frames",
+            "10000000",
+            "--frames-per-batch",
+            "30",
+            "--storage-size",
+            "200",
+            "--batch-size",
+            "20",
+            "--utd-ratio",
+            "0.1",
+            "--eval-interval",
+            "30",
+            "--eval-episodes",
+            "1",
+            "--save-interval",
+            "30",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--resume",
+            resume_ckpt,
+            "--max-steps",
+            "10",
+            "--no-enable-adr",
+            "--early-stop-on-target",
+            "--target-success-rate",
+            "0.85",
+        ]
+    )
+    mock_metrics = {
+        "success_rate": 0.95,
+        "mean_consecutive_successes": 5.0,
+        "mean_geodesic_error": 0.04,
+        "mean_return": 120.0,
+    }
+    monkeypatch.setattr("train.evaluate_policy", lambda **kwargs: mock_metrics)
+
+    summary2 = train(args2)
+    assert summary2["converged"] is True
+    assert summary2["total_frames"] == 30
+    # start_step was 30, so current_step = start_step + total_frames = 60
+    assert summary2["final_step"] == 60
+
 
 
 
