@@ -445,19 +445,20 @@ def test_update_collector_target_mode_single_env():
 
 def test_update_collector_target_mode_parallel_env():
     """Verify update_collector_target_mode updates target_mode on batched / parallel env collector."""
+    from functools import partial
     from unittest.mock import MagicMock
 
-    from torchrl.envs.batched_envs import SerialEnv
+    from torchrl.envs.batched_envs import ParallelEnv, SerialEnv
 
     from src.algo import update_collector_target_mode
     from src.envs import LeapCubeReorientEnv
 
-    # Test with SerialEnv
+    # 1. Test with SerialEnv
     s_env = SerialEnv(
         2,
         [
-            lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3"),
-            lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3"),
+            partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3"),
+            partial(LeapCubeReorientEnv, max_steps=10, target_mode="so3"),
         ],
     )
     s_env.start()
@@ -475,12 +476,32 @@ def test_update_collector_target_mode_parallel_env():
     finally:
         s_env.close()
 
-    # Test with a mock ParallelEnv that dispatches set_target_mode
-    mock_penv = MagicMock()
-    mock_collector2 = MagicMock()
-    mock_collector2.env = mock_penv
+    # 2. Test with real ParallelEnv passed directly (unstarted) and via collector
+    penv = ParallelEnv(
+        2,
+        [
+            partial(LeapCubeReorientEnv, max_steps=20, target_mode="yaw"),
+            partial(LeapCubeReorientEnv, max_steps=20, target_mode="yaw"),
+        ],
+    )
+    try:
+        # Directly passing unstarted ParallelEnv as collector
+        update_collector_target_mode(penv, "so3")
+        assert penv.target_mode() == ["so3", "so3"]
 
-    update_collector_target_mode(mock_collector2, "yaw")
-    mock_penv.set_target_mode.assert_called_with("yaw")
+        update_collector_target_mode(penv, "yaw")
+        assert penv.target_mode() == ["yaw", "yaw"]
+
+        # Passing via collector wrapper with .env
+        collector_wrapper = MagicMock()
+        collector_wrapper.env = penv
+        update_collector_target_mode(collector_wrapper, "so3")
+        assert penv.target_mode() == ["so3", "so3"]
+
+        update_collector_target_mode(collector_wrapper, "yaw")
+        assert penv.target_mode() == ["yaw", "yaw"]
+    finally:
+        if not penv.is_closed:
+            penv.close()
 
 

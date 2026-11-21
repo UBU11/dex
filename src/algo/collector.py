@@ -105,43 +105,95 @@ def update_collector_target_mode(collector: Any, target_mode: str) -> None:
             f"Invalid target_mode '{target_mode}'. Expected 'so3' or 'yaw'."
         )
 
-    env = getattr(collector, "env", collector)
+    # If collector is already an environment, do not access .env as batched envs (e.g. ParallelEnv)
+    # intercept __getattr__("env") and dispatch to workers or raise if closed.
+    if isinstance(collector, EnvBase):
+        env = collector
+    elif (
+        hasattr(type(collector), "env")
+        or isinstance(
+            collector,
+            (Collector, getattr(collectors, "BaseCollector", Collector)),
+        )
+        or "env" in getattr(collector, "__dict__", {})
+    ):
+        env = getattr(collector, "env", collector)
+    elif not isinstance(collector, EnvBase) and hasattr(collector, "env"):
+        try:
+            candidate = collector.env
+            env = candidate if candidate is not None else collector
+        except (AttributeError, RuntimeError):
+            env = collector
+    else:
+        env = collector
+
+    # Start closed/unstarted batched environments before attribute checks
+    try:
+        if (
+            getattr(env, "is_closed", False)
+            and hasattr(env, "start")
+            and callable(getattr(env, "start", None))
+        ):
+            env.start()
+    except RuntimeError:
+        pass
 
     # Batched / ParallelEnv / single LeapCubeReorientEnv dispatching set_target_mode
-    if hasattr(env, "set_target_mode") and callable(getattr(env, "set_target_mode", None)):
-        if getattr(env, "is_closed", False) and hasattr(env, "start"):
-            env.start()
+    try:
+        has_set_target_mode = hasattr(env, "set_target_mode") and callable(
+            getattr(env, "set_target_mode", None)
+        )
+    except RuntimeError:
+        has_set_target_mode = False
+
+    if has_set_target_mode:
         env.set_target_mode(target_mode)
         return
 
     # Sub-environments list (e.g. SerialEnv or custom batched env)
-    if hasattr(env, "_envs") and isinstance(env._envs, (list, tuple)):
+    if "_envs" in getattr(env, "__dict__", {}) and isinstance(
+        env._envs, (list, tuple)
+    ):
         for sub_env in env._envs:
-            if hasattr(sub_env, "set_target_mode"):
-                sub_env.set_target_mode(target_mode)
-            elif hasattr(sub_env, "base_env") and hasattr(
-                sub_env.base_env, "set_target_mode"
-            ):
-                sub_env.base_env.set_target_mode(target_mode)
+            update_collector_target_mode(sub_env, target_mode)
         return
 
-    if hasattr(env, "sub_envs") and isinstance(env.sub_envs, (list, tuple)):
+    if "sub_envs" in getattr(env, "__dict__", {}) and isinstance(
+        env.sub_envs, (list, tuple)
+    ):
         for sub_env in env.sub_envs:
-            if hasattr(sub_env, "set_target_mode"):
-                sub_env.set_target_mode(target_mode)
+            update_collector_target_mode(sub_env, target_mode)
         return
 
     # Transformed / wrapped environment
     unwrapped = env
-    while hasattr(unwrapped, "base_env"):
+    while (
+        hasattr(type(unwrapped), "base_env")
+        or "base_env" in getattr(unwrapped, "__dict__", {})
+        or (hasattr(unwrapped, "_modules") and "base_env" in unwrapped._modules)
+    ):
         unwrapped = unwrapped.base_env
-        if hasattr(unwrapped, "set_target_mode") and callable(
-            getattr(unwrapped, "set_target_mode", None)
-        ):
-            unwrapped.set_target_mode(target_mode)
-            return
+        try:
+            if (
+                getattr(unwrapped, "is_closed", False)
+                and hasattr(unwrapped, "start")
+                and callable(getattr(unwrapped, "start", None))
+            ):
+                unwrapped.start()
+        except RuntimeError:
+            pass
+        try:
+            if hasattr(unwrapped, "set_target_mode") and callable(
+                getattr(unwrapped, "set_target_mode", None)
+            ):
+                unwrapped.set_target_mode(target_mode)
+                return
+        except RuntimeError:
+            pass
 
     # Attribute fallback
-    if hasattr(env, "target_mode"):
+    if hasattr(type(env), "target_mode") or "target_mode" in getattr(
+        env, "__dict__", {}
+    ):
         env.target_mode = target_mode
 
