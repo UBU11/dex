@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import mujoco
 import numpy as np
+import pytest
 import torch
 from torchrl.envs.utils import check_env_specs
 
@@ -411,6 +412,49 @@ def test_reset_orientation_distribution():
         assert abs(quat[1]) < 1e-6
         assert abs(quat[2]) < 1e-6
         assert math.isclose(np.linalg.norm(quat), 1.0, rel_tol=1e-5)
+
+
+def test_leap_cube_env_set_target_mode():
+    """Verify dynamic target_mode switching between 'so3' and 'yaw', input validation, and goal sampling."""
+    env = LeapCubeReorientEnv(target_mode="so3", seed=42)
+    assert env.target_mode == "so3"
+
+    # Switch to yaw
+    env.set_target_mode("yaw")
+    assert env.target_mode == "yaw"
+
+    # Verify sampled goals under yaw mode have x=0, y=0 and norm 1
+    for _ in range(10):
+        goal = env._sample_goal()
+        # quaternion is [w, x, y, z]
+        assert abs(float(goal[1])) < 1e-6
+        assert abs(float(goal[2])) < 1e-6
+        assert math.isclose(float(torch.norm(goal)), 1.0, rel_tol=1e-5)
+
+    # Reset also uses new target mode
+    td = env.reset()
+    desired_goal = td["desired_goal"]
+    assert abs(float(desired_goal[1])) < 1e-6
+    assert abs(float(desired_goal[2])) < 1e-6
+
+    # Switch back to so3
+    env.set_target_mode("so3")
+    assert env.target_mode == "so3"
+
+    # Sample goals under so3 mode - should have non-zero x or y
+    has_nonzero_xy = False
+    for _ in range(10):
+        goal = env._sample_goal()
+        assert math.isclose(float(torch.norm(goal)), 1.0, rel_tol=1e-5)
+        if abs(float(goal[1])) > 1e-4 or abs(float(goal[2])) > 1e-4:
+            has_nonzero_xy = True
+    assert has_nonzero_xy
+
+    # Test invalid target mode raises ValueError
+    with pytest.raises(ValueError, match="Invalid target_mode"):
+        env.set_target_mode("invalid_mode")
+    with pytest.raises(ValueError, match="Invalid target_mode"):
+        env.set_target_mode("pitch")
 
 
 

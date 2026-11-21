@@ -140,6 +140,12 @@ class LeapCubeReorientEnv(EnvBase):
     def domain_randomizer(self) -> DomainRandomizer | None:
         return self.randomizer
 
+    def set_target_mode(self, mode: str) -> None:
+        """Sets target orientation mode ('so3' or 'yaw')."""
+        if mode not in ("so3", "yaw"):
+            raise ValueError(f"Invalid target_mode '{mode}'. Expected 'so3' or 'yaw'.")
+        self.target_mode = mode
+
     def _make_specs(self) -> None:
         """Configures TorchRL action, observation, reward, and done specs."""
         self.action_spec = Bounded(

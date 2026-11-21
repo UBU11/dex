@@ -412,3 +412,75 @@ def test_train_no_early_stop_when_disabled(tmp_path, monkeypatch):
     assert summary["total_frames"] == 100
 
 
+def test_update_collector_target_mode_single_env():
+    """Verify update_collector_target_mode updates target_mode on single LeapCubeReorientEnv collector."""
+    from src.algo import update_collector_target_mode
+    from src.algo.actor import SquashedGaussianSACActor
+    from src.algo.collector import PolicyModule, create_trajectory_collector
+    from src.algo.her import create_her_replay_buffer
+    from src.envs import LeapCubeReorientEnv
+
+    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
+    collector = create_trajectory_collector(
+        env_fn=env_fn,
+        policy=policy,
+        replay_buffer=rb,
+        frames_per_batch=10,
+        total_frames=10,
+    )
+    try:
+        assert collector.env.target_mode == "so3"
+        update_collector_target_mode(collector, "yaw")
+        assert collector.env.target_mode == "yaw"
+        update_collector_target_mode(collector, "so3")
+        assert collector.env.target_mode == "so3"
+        with pytest.raises(ValueError, match="Invalid target_mode"):
+            update_collector_target_mode(collector, "invalid")
+    finally:
+        collector.shutdown()
+
+
+def test_update_collector_target_mode_parallel_env():
+    """Verify update_collector_target_mode updates target_mode on batched / parallel env collector."""
+    from unittest.mock import MagicMock
+
+    from torchrl.envs.batched_envs import SerialEnv
+
+    from src.algo import update_collector_target_mode
+    from src.envs import LeapCubeReorientEnv
+
+    # Test with SerialEnv
+    s_env = SerialEnv(
+        2,
+        [
+            lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3"),
+            lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3"),
+        ],
+    )
+    s_env.start()
+    mock_collector = MagicMock()
+    mock_collector.env = s_env
+
+    try:
+        update_collector_target_mode(mock_collector, "yaw")
+        for sub_env in s_env._envs:
+            assert sub_env.target_mode == "yaw"
+
+        update_collector_target_mode(mock_collector, "so3")
+        for sub_env in s_env._envs:
+            assert sub_env.target_mode == "so3"
+    finally:
+        s_env.close()
+
+    # Test with a mock ParallelEnv that dispatches set_target_mode
+    mock_penv = MagicMock()
+    mock_collector2 = MagicMock()
+    mock_collector2.env = mock_penv
+
+    update_collector_target_mode(mock_collector2, "yaw")
+    mock_penv.set_target_mode.assert_called_with("yaw")
+
+

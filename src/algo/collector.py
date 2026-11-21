@@ -89,3 +89,59 @@ def create_trajectory_collector(
         total_frames=total_frames,
         **collector_kwargs,
     )
+
+
+def update_collector_target_mode(collector: Any, target_mode: str) -> None:
+    """Updates target orientation mode across environments in a collector.
+
+    Supports single LeapCubeReorientEnv, ParallelEnv, SerialEnv, or custom batched environments.
+
+    Args:
+        collector: Collector instance or environment.
+        target_mode: Target orientation mode ("so3" or "yaw").
+    """
+    if target_mode not in ("so3", "yaw"):
+        raise ValueError(
+            f"Invalid target_mode '{target_mode}'. Expected 'so3' or 'yaw'."
+        )
+
+    env = getattr(collector, "env", collector)
+
+    # Batched / ParallelEnv / single LeapCubeReorientEnv dispatching set_target_mode
+    if hasattr(env, "set_target_mode") and callable(getattr(env, "set_target_mode", None)):
+        if getattr(env, "is_closed", False) and hasattr(env, "start"):
+            env.start()
+        env.set_target_mode(target_mode)
+        return
+
+    # Sub-environments list (e.g. SerialEnv or custom batched env)
+    if hasattr(env, "_envs") and isinstance(env._envs, (list, tuple)):
+        for sub_env in env._envs:
+            if hasattr(sub_env, "set_target_mode"):
+                sub_env.set_target_mode(target_mode)
+            elif hasattr(sub_env, "base_env") and hasattr(
+                sub_env.base_env, "set_target_mode"
+            ):
+                sub_env.base_env.set_target_mode(target_mode)
+        return
+
+    if hasattr(env, "sub_envs") and isinstance(env.sub_envs, (list, tuple)):
+        for sub_env in env.sub_envs:
+            if hasattr(sub_env, "set_target_mode"):
+                sub_env.set_target_mode(target_mode)
+        return
+
+    # Transformed / wrapped environment
+    unwrapped = env
+    while hasattr(unwrapped, "base_env"):
+        unwrapped = unwrapped.base_env
+        if hasattr(unwrapped, "set_target_mode") and callable(
+            getattr(unwrapped, "set_target_mode", None)
+        ):
+            unwrapped.set_target_mode(target_mode)
+            return
+
+    # Attribute fallback
+    if hasattr(env, "target_mode"):
+        env.target_mode = target_mode
+

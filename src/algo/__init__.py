@@ -9,7 +9,11 @@ from src.algo.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
-from src.algo.collector import PolicyModule, create_trajectory_collector
+from src.algo.collector import (
+    PolicyModule,
+    create_trajectory_collector,
+    update_collector_target_mode,
+)
 from src.algo.critic import TwinContinuousQCritic
 from src.algo.evaluation import evaluate_policy
 from src.algo.her import VectorizedFutureHER, create_her_replay_buffer
@@ -31,4 +35,5 @@ __all__ = [
     "load_checkpoint",
     "save_checkpoint",
     "stable_tanh_jacobian_correction",
+    "update_collector_target_mode",
 ]
