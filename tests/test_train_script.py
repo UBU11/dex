@@ -505,3 +505,98 @@ def test_update_collector_target_mode_parallel_env():
             penv.close()
 
 
+def test_create_trajectory_collector_multi_worker_parallel():
+    """Verify create_trajectory_collector supports num_workers > 1 with ParallelEnv."""
+    from torchrl.envs.batched_envs import ParallelEnv
+
+    from src.algo import update_collector_target_mode
+    from src.algo.actor import SquashedGaussianSACActor
+    from src.algo.collector import PolicyModule, create_trajectory_collector
+    from src.algo.her import create_her_replay_buffer
+    from src.envs import LeapCubeReorientEnv
+
+    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
+
+    collector = create_trajectory_collector(
+        env_fn=env_fn,
+        policy=policy,
+        replay_buffer=rb,
+        frames_per_batch=20,
+        total_frames=20,
+        num_workers=2,
+    )
+    try:
+        assert isinstance(collector.env, ParallelEnv)
+        assert collector.env.batch_size == torch.Size([2])
+        # Test target mode update on multi-worker collector
+        update_collector_target_mode(collector, "yaw")
+        assert collector.env.target_mode() == ["yaw", "yaw"]
+        update_collector_target_mode(collector, "so3")
+        assert collector.env.target_mode() == ["so3", "so3"]
+
+        # Collect transitions into replay buffer
+        for _ in collector:
+            pass
+        assert len(rb) >= 20
+    finally:
+        collector.shutdown()
+
+
+def test_create_trajectory_collector_multi_worker_with_domain_randomization():
+    """Verify multi-worker collector properly wraps domain randomization on workers."""
+    from torchrl.envs.batched_envs import ParallelEnv
+
+    from src.algo.actor import SquashedGaussianSACActor
+    from src.algo.collector import PolicyModule, create_trajectory_collector
+    from src.algo.her import create_her_replay_buffer
+    from src.envs import LeapCubeReorientEnv
+
+    env_fn = lambda: LeapCubeReorientEnv(max_steps=10, target_mode="so3")
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
+
+    collector = create_trajectory_collector(
+        env_fn=env_fn,
+        policy=policy,
+        replay_buffer=rb,
+        frames_per_batch=20,
+        total_frames=20,
+        enable_domain_randomization=True,
+        num_workers=2,
+    )
+    try:
+        assert isinstance(collector.env, ParallelEnv)
+        for _ in collector:
+            pass
+        assert len(rb) >= 20
+    finally:
+        collector.shutdown()
+
+
+def test_create_trajectory_collector_invalid_num_workers():
+    """Verify create_trajectory_collector raises ValueError for invalid num_workers."""
+    from src.algo.actor import SquashedGaussianSACActor
+    from src.algo.collector import PolicyModule, create_trajectory_collector
+    from src.algo.her import create_her_replay_buffer
+    from src.envs import LeapCubeReorientEnv
+
+    env_fn = lambda: LeapCubeReorientEnv(max_steps=10)
+    actor = SquashedGaussianSACActor(obs_dim=55, goal_dim=4, action_dim=16)
+    policy = PolicyModule(actor)
+    rb = create_her_replay_buffer(storage_size=100, slice_len=10, batch_size=10)
+
+    with pytest.raises(ValueError, match="num_workers"):
+        create_trajectory_collector(
+            env_fn=env_fn,
+            policy=policy,
+            replay_buffer=rb,
+            frames_per_batch=10,
+            num_workers=0,
+        )
+
+
+

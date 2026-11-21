@@ -6,7 +6,7 @@ from torch import nn
 from torchrl import collectors
 from torchrl.collectors import Collector
 from torchrl.data import TensorDictReplayBuffer
-from torchrl.envs import EnvBase
+from torchrl.envs import EnvBase, ParallelEnv
 
 from src.algo.actor import SquashedGaussianSACActor
 
@@ -44,9 +44,24 @@ def create_trajectory_collector(
     frames_per_batch: int,
     total_frames: int = -1,
     enable_domain_randomization: bool = False,
+    num_workers: int = 1,
     **kwargs: Any,
 ) -> Collector:
-    """Creates a SyncDataCollector configured for trajectory-mode writing into replay buffer."""
+    """Creates a SyncDataCollector configured for trajectory-mode writing into replay buffer.
+
+    Args:
+        env_fn: Factory function returning an environment instance.
+        policy: Policy module used for action generation during rollouts.
+        replay_buffer: Target replay buffer for trajectory storage.
+        frames_per_batch: Number of frames to collect per iteration.
+        total_frames: Total number of frames before collector termination (-1 for infinite).
+        enable_domain_randomization: Whether to wrap environments with ADR domain randomization.
+        num_workers: Number of parallel environment workers. When > 1, wraps in ParallelEnv.
+        **kwargs: Additional keyword arguments forwarded to SyncDataCollector.
+    """
+    if num_workers < 1:
+        raise ValueError(f"num_workers must be at least 1, got {num_workers}.")
+
     if enable_domain_randomization:
         original_env_fn = env_fn
 
@@ -74,6 +89,10 @@ def create_trajectory_collector(
                 return env
 
         env_fn = wrapped_env_fn
+
+    if num_workers > 1:
+        workers = [env_fn for _ in range(num_workers)]
+        env_fn = ParallelEnv(num_workers, workers)
 
     collector_kwargs = {
         "replay_write_mode": "trajectory",
