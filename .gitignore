@@ -8,3 +8,15 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Checkpoints and logs
+checkpoints/checkpoint_step_*.pt
+checkpoints/*.log
+MUJOCO_LOG.TXT
+*.log
+
+# Caches and local runtime
+.pytest_cache/
+.ruff_cache/
+.superpowers/
+
