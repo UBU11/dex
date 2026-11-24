@@ -44,6 +44,19 @@ The simulation environment is assembled programmatically via MuJoCo's `MjSpec` A
 
 ---
 
+## System Architecture
+
+The pipeline is organized into four decoupled components interfaced through TorchRL `TensorDict` structures:
+
+![System Architecture](assets/system_architecture.png)
+
+1. **Physics and Domain Randomization Layer:** Evaluates multi-body contact dynamics and integrates the LEAP Hand and cube states. Low-level PD position tracking converts relative target joint angles to actuator torques at 200 Hz.
+2. **Goal-Conditioned Rollout Collector:** Collects multi-step trajectories in parallel or single-worker configurations. Packages the 55-dimensional state, 4-dimensional achieved goal, and 4-dimensional target quaternion.
+3. **Trajectory Hindsight Experience Replay Buffer:** Stores complete trajectories using sequential slicing (`slice_len = 20`). With 80% probability, future achieved orientations replace the original desired goal, transforming dropped or deflected trajectories into successful training experiences.
+4. **Soft Actor-Critic Learner:** Optimizes an actor network with exact tanh squashing Jacobian corrections alongside twin clipped Q-critics with soft target updates and temperature parameter optimization.
+
+---
+
 ## Mathematical Formulation
 
 ### Observation Space (55 Dimensions)
@@ -89,3 +102,40 @@ The angular success threshold is set to $\theta_{\text{threshold}} = 0.15\text{ 
 ### Consecutive Multi-Goal Chaining
 
 When the current target orientation is held within the tolerance threshold for 5 consecutive policy steps, the environment logs a successful orientation, resamples a fresh target quaternion $g' \sim SO(3)$, and continues the episode without resetting hand posture.
+
+---
+
+## Reinforcement Learning Details
+
+### Squashed Gaussian Actor with Exact Log-Prob Correction
+
+The policy outputs unconstrained Gaussian parameters $(\mu, \log \sigma)$ and squashes samples through a tanh bijection: $u = \tanh(x)$. To maintain valid probability densities during policy optimization, the log-probability accounts for the diagonal Jacobian determinant:
+
+$$\log \pi(u \mid s) = \log \mu(x \mid s) - \sum_{i=1}^{16} \log \left( 1 - \tanh^2(x_i) + \epsilon \right)$$
+
+### Twin Clipped Critics
+
+Twin Q-networks $Q_{\psi_1}(s, g, u)$ and $Q_{\psi_2}(s, g, u)$ mitigate overestimation bias by taking the minimum target prediction:
+
+$$y_t = r_t + \gamma (1 - d_t) \left( \min_{j=1,2} Q_{\bar{\psi}_j}(s_{t+1}, g, \tilde{u}_{t+1}) - \alpha \log \pi_\theta(\tilde{u}_{t+1} \mid s_{t+1}, g) \right)$$
+
+Target networks are updated via Polyak averaging:
+
+$$\bar{\psi}_j \leftarrow \tau \psi_j + (1 - \tau) \bar{\psi}_j, \quad \tau = 0.005$$
+
+### Automatic Temperature Adjustment
+
+The entropy temperature $\alpha$ is tuned dynamically to match the target entropy $\mathcal{H}_0 = -\dim(\mathcal{A}) = -16.0$:
+
+$$J(\alpha) = \mathbb{E}\left[ -\alpha \left( \log \pi_\theta(u \mid s, g) + \mathcal{H}_0 \right) \right]$$
+
+---
+
+## Domain Randomization and Reset Distribution
+
+To prevent policies from exploiting specific simulator initial conditions, the environment incorporates domain randomization and pose perturbation:
+
+1. **Palm Translation Offset:** Initial cube position perturbed by $\Delta x, \Delta y \sim \mathcal{U}(-0.015, 0.015)\text{ m}$.
+2. **Initial Orientation Randomization:** Cube initial orientation sampled randomly across the unit sphere.
+3. **Inertial and Frictional Perturbations:** Dynamic randomization of cube mass ($\pm 20\%$), sliding friction ($\pm 30\%$), and actuator bias.
+4. **Curriculum Warmup:** Optional training phase restricting targets to planar yaw rotations before transitioning to full $SO(3)$ targets.
