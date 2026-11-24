@@ -139,3 +139,175 @@ To prevent policies from exploiting specific simulator initial conditions, the e
 2. **Initial Orientation Randomization:** Cube initial orientation sampled randomly across the unit sphere.
 3. **Inertial and Frictional Perturbations:** Dynamic randomization of cube mass ($\pm 20\%$), sliding friction ($\pm 30\%$), and actuator bias.
 4. **Curriculum Warmup:** Optional training phase restricting targets to planar yaw rotations before transitioning to full $SO(3)$ targets.
+
+---
+
+## Training Performance and Dynamics
+
+Evaluation metrics tracked over training steps:
+
+![Training Dynamics](assets/training_curves.png)
+
+* **Success Rate:** Measures the fraction of evaluation trajectories reaching orientation accuracy within $0.15\text{ rad}$.
+* **Geodesic Angular Error:** Tracks mean rotation distance between achieved and desired orientations throughout rollout execution.
+* **Checkpoint Retention:** Best performing weights are continuously serialized alongside full training states and ONNX deployment graphs.
+
+---
+
+## Repository Structure
+
+```
+.
+├── assets/
+│   ├── simulation_environment.png    # Primary MuJoCo simulation render
+│   ├── simulation_multiview.png      # 4-angle kinematic and contact mechanics panel
+│   ├── system_architecture.png       # Complete reinforcement learning architecture
+│   └── training_curves.png           # Evaluation metrics over training frames
+├── checkpoints/
+│   ├── best_model.pt                 # Highest-performing policy checkpoint
+│   ├── best_policy.onnx              # Standalone ONNX policy graph
+│   └── metrics_summary.json          # Serialized training and evaluation log
+├── docs/
+│   ├── project.md                    # Engineering design notes and mathematical derivations
+│   └── superpowers/plans/            # Technical implementation plans
+├── scripts/
+│   └── generate_figures.py           # Offscreen figure generation script
+├── src/
+│   ├── algo/
+│   │   ├── actor.py                  # Squashed Gaussian actor with exact Jacobian correction
+│   │   ├── checkpoint.py             # Checkpoint serialization and ONNX export routines
+│   │   ├── collector.py              # TorchRL rollout collection interfaces
+│   │   ├── critic.py                 # Twin continuous Q-critics
+│   │   ├── evaluation.py             # Deterministic evaluation and goal-chaining metrics
+│   │   ├── her.py                    # Hindsight experience replay buffer construction
+│   │   └── sac_trainer.py            # SAC loss computation and parameter updates
+│   ├── envs/
+│   │   ├── domain_randomization.py   # ADR controller and parameter perturbation
+│   │   ├── leap_cube_env.py          # TorchRL environment wrapper for LEAP Hand + Cube
+│   │   ├── pd_controller.py          # Low-level joint PD controller (200 Hz)
+│   │   └── spec.py                   # MjSpec assembly of LEAP Hand and cube
+│   └── utils/
+│       └── quaternion.py             # Geodesic SO(3) distance and quaternion operations
+├── tests/                            # 106 unit and integration tests
+├── main.py                           # Extended horizon and multi-target demonstration
+├── train.py                          # Distributed/single-worker training script
+├── visualize.py                      # Interactive MuJoCo simulation viewer
+├── pyproject.toml                    # Project metadata and dependencies
+└── README.md
+```
+
+---
+
+## Installation
+
+### Prerequisites
+
+* Linux (x86_64)
+* Python 3.14+ (or Python 3.12+ with compatible virtual environment)
+* MuJoCo 3.4+
+
+### Setting Up the Environment
+
+Using `uv` or standard Python virtual environment:
+
+```bash
+# Clone the repository
+git clone https://github.com/UBU11/dex.git
+cd dex
+
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install package dependencies
+pip install -e .
+```
+
+### Key Dependencies
+
+* `torch>=2.15.0`
+* `torchrl>=0.15.0`
+* `tensordict>=0.15.2`
+* `mujoco>=3.4.0`
+* `mujoco-menagerie>=2026.9.0`
+* `onnx>=1.23.2`
+
+---
+
+## Usage
+
+### 1. Interactive MuJoCo Viewer
+
+Launch the real-time interactive physics viewer to inspect hand kinematics, contact points, and cube physics:
+
+```bash
+# Passive zero-action mode
+python visualize.py --checkpoint none
+
+# Evaluate trained checkpoint
+python visualize.py --checkpoint checkpoints/best_model.pt --target-mode so3
+
+# Export standalone MuJoCo XML model
+python visualize.py --checkpoint none --export-xml assets/leap_cube_assembled.xml
+```
+
+Viewer controls:
+* **Space:** Pause / Unpause physics simulation.
+* **Backspace:** Reset simulation state to home keyframe.
+* **Right Mouse Drag:** Orbit camera.
+* **Left Mouse Drag:** Perturb or apply external forces to hand joints and cube.
+* **Scroll Wheel:** Zoom camera in / out.
+
+### 2. Multi-Target Chaining Demonstration
+
+Run the verification script showcasing reset distribution hardening, consecutive goal sampling, and trajectory replay:
+
+```bash
+python main.py
+```
+
+### 3. Training
+
+Train the agent from scratch or resume from a checkpoint:
+
+```bash
+# Standard training run on CPU
+python train.py --total-frames 1000000 --batch-size 256 --device cpu
+
+# Training with GPU acceleration and 4 parallel collection workers
+python train.py --total-frames 1000000 --batch-size 256 --device cuda --num-workers 4
+
+# Training with curriculum warmup (first 200,000 frames on planar yaw targets)
+python train.py --warmup-yaw-frames 200000 --total-frames 1000000
+
+# Resume from existing checkpoint
+python train.py --resume checkpoints/checkpoint_step_500000.pt
+```
+
+### 4. Running the Test Suite
+
+Execute the test suite covering kinematics, quaternion mathematics, HER relabeling, Jacobian corrections, and ADR transitions:
+
+```bash
+pytest tests/ -v
+```
+
+---
+
+## Standalone ONNX Deployment
+
+The trained policy is exported directly to an ONNX computation graph (`checkpoints/best_policy.onnx`). It accepts a 59-dimensional input tensor (concatenation of 55D state and 4D target quaternion) and outputs deterministic 16-dimensional relative joint targets without requiring PyTorch at runtime:
+
+```python
+import numpy as np
+import onnxruntime as ort
+
+session = ort.InferenceSession("checkpoints/best_policy.onnx")
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
+
+# Example: 55-dimensional observation + 4-dimensional target quaternion
+dummy_obs_and_goal = np.zeros((1, 59), dtype=np.float32)
+action = session.run([output_name], {input_name: dummy_obs_and_goal})[0]
+print("Computed joint action shape:", action.shape)
+```
